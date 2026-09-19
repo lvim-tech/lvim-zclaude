@@ -60,21 +60,27 @@ impl Row {
     }
 }
 
-/// The label for a project: its directory's name, and the parent too when the name alone would
-/// name two different projects (`rust/bru` beside `RECOVERED/…/bru`).
+/// The label for a project: as much of the tail of its path as it takes to be its own.
+///
+/// One segment is usually enough. When it is not, another is added, and another — `go/keyforge`
+/// under `/mnt/development` and under `RECOVERED/projects` share *two* segments, and a board that
+/// printed them the same would be a board with two identical rows and no way to tell which is
+/// which. Measured 2026-09-19 on the real data: `go/keyforge` twice, `php/motion-php` twice.
 pub fn project_label(cwd: &str, all: &[String]) -> String {
-    let base = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
-    let mine = base(cwd);
-    let twins = all.iter().filter(|other| base(other) == mine).count();
-    if twins <= 1 {
-        return mine;
+    let tail = |path: &str, segments: usize| {
+        let parts: Vec<&str> = path.trim_end_matches('/').rsplit('/').filter(|p| !p.is_empty()).collect();
+        let take = segments.min(parts.len());
+        parts[..take].iter().rev().copied().collect::<Vec<_>>().join("/")
+    };
+    let depth = cwd.split('/').filter(|p| !p.is_empty()).count().max(1);
+    for segments in 1..=depth {
+        let mine = tail(cwd, segments);
+        let twins = all.iter().filter(|other| tail(other, segments) == mine).count();
+        if twins <= 1 {
+            return mine;
+        }
     }
-    let parent = cwd.trim_end_matches('/');
-    let parent = &parent[..parent.len().saturating_sub(mine.len() + 1)];
-    match parent.rsplit('/').next() {
-        Some(up) if !up.is_empty() => format!("{up}/{mine}"),
-        _ => mine,
-    }
+    cwd.to_string()
 }
 
 /// How long ago, in one column: `12s`, `4m`, `3h`, `6d`.
@@ -248,18 +254,26 @@ mod tests {
         }
     }
 
-    /// **The ambiguity the cwd exists to solve.** Two projects can end in the same name, and the
-    /// directory under `~/.claude/projects` cannot be turned back into a path.
+    /// **The ambiguity the cwd exists to solve**, and the deeper one the real data had: two
+    /// projects that share their last *two* segments.
     #[test]
-    fn a_project_shows_its_parent_only_when_its_name_is_not_its_own() {
+    fn a_project_is_named_by_as_much_of_its_path_as_it_takes() {
         let all = vec![
             "/mnt/dev/rust/bru".to_string(),
             "/home/x/RECOVERED/rust/bru".to_string(),
             "/mnt/dev/lua".to_string(),
+            "/mnt/development/go/keyforge".to_string(),
+            "/home/x/RECOVERED/projects/go/keyforge".to_string(),
         ];
-        assert_eq!(project_label("/mnt/dev/rust/bru", &all), "rust/bru");
-        assert_eq!(project_label("/home/x/RECOVERED/rust/bru", &all), "rust/bru");
-        assert_eq!(project_label("/mnt/dev/lua", &all), "lua", "unique, so no parent");
+        assert_eq!(project_label("/mnt/dev/lua", &all), "lua", "unique on its own");
+        assert_eq!(project_label("/mnt/dev/rust/bru", &all), "dev/rust/bru");
+        assert_eq!(project_label("/home/x/RECOVERED/rust/bru", &all), "RECOVERED/rust/bru");
+        // Two segments are the same for both, so a third is what tells them apart.
+        assert_eq!(project_label("/mnt/development/go/keyforge", &all), "development/go/keyforge");
+        assert_eq!(
+            project_label("/home/x/RECOVERED/projects/go/keyforge", &all),
+            "projects/go/keyforge"
+        );
     }
 
     #[test]
