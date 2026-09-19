@@ -1,0 +1,20 @@
+// lvim-zclaude — the lvim-zpm manifest. The board of Claude Code sessions: which exist, which one
+// is running, and a jump to the pane it runs in. One keybind, tmux mode:
+//   Ctrl s, then a  — open (or focus) the board as a floating pane
+// `{{wasm}}` becomes the absolute `file:` URL of the built wasm below.
+//
+// The three permissions, and why each is needed:
+//   ReadApplicationState   — the pane manifest, the tabs, and `get_pane_pid`, which is how a
+//                            running `claude` is matched to the pane it lives in.
+//   ChangeApplicationState — focusing that pane, naming and sizing the board's own floating pane.
+//   RunCommands            — the one `sh -c` scan. A plugin is WASI in a sandbox and cannot read
+//                            `~/.claude` itself; nothing else in this plugin shells out.
+plugin {
+    wasm "lvim-zclaude.wasm"
+    permissions "ReadApplicationState" "ChangeApplicationState" "RunCommands"
+    keybinds {
+        tmux {
+            bind "a" { LaunchOrFocusPlugin "{{wasm}}" { floating true; move_to_focused_tab true; }; SwitchToMode "normal"; }
+        }
+    }
+}

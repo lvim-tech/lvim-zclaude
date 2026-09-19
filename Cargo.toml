@@ -1,0 +1,15 @@
+[package]
+name = "lvim-zclaude"
+version = "0.1.0"
+edition = "2021"
+authors = ["lvim-tech"]
+description = "Claude Code sessions board for zellij: which sessions exist, which one is running, and a jump to the pane it runs in"
+license = "BSD-3-Clause"
+
+[dependencies]
+zellij-tile = "0.44.3"
+
+[profile.release]
+lto = true
+opt-level = "z"
+strip = true
