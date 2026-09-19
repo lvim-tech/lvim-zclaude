@@ -94,8 +94,11 @@ cutting) on the host.
 
 ## Limits
 
-- The jump works **inside the current zellij session**. A session running under another zellij
-  server is named in the `WHERE` column, and `Enter` says so rather than switching the client.
+- `Enter` on a session in **another zellij session** switches the client there and focuses its
+  `claude` pane, found through `zellij --session NAME action list-panes` by command and directory.
+  If the pane cannot be told apart, the client is switched to the session without a focus.
+- Every colour comes from the active zellij theme (on the lvim themes, lvim-colorscheme's palette);
+  the board owns none of its own.
 - Stopped sessions are listed, not resumed. The board never starts, resumes or kills anything.
 - A session whose pane has not been started yet (a resurrected, suspended pane) has no process, so
   it cannot be located.
