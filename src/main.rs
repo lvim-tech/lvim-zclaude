@@ -73,6 +73,8 @@ struct State {
     filter: String,
     expanded: Vec<String>,
     last_error: Option<String>,
+    /// The active zellij theme's colours, from `ModeUpdate`. See `ui::Palette`.
+    palette: Option<ui::Palette>,
 }
 
 register_plugin!(State);
@@ -136,9 +138,11 @@ impl ZellijPlugin for State {
                 true
             }
             Event::ModeUpdate(mode) => {
-                let changed = self.session_name != mode.session_name;
+                // The theme arrives here, and again on every theme switch — so the board repaints
+                // in the new colours without being reopened, as `lvim-zbar` does.
+                self.palette = Some(ui::Palette::from_style(&mode.style.colors));
                 self.session_name = mode.session_name;
-                changed
+                true
             }
             Event::TabUpdate(tabs) => {
                 let changed = self.tabs != tabs;
@@ -176,6 +180,10 @@ impl ZellijPlugin for State {
                 asked
             }
             Event::RunCommandResult(code, out, err, context) => {
+                if context.get("step").map(String::as_str) == Some("panes") {
+                    self.jump_there(&String::from_utf8_lossy(&out), &context);
+                    return true;
+                }
                 if context.get("step").map(String::as_str) != Some("scan") {
                     return false;
                 }
@@ -223,6 +231,7 @@ impl ZellijPlugin for State {
             files: self.files.len(),
             last_error: self.last_error.as_deref(),
             permitted: self.permitted,
+            palette: self.palette,
         };
         ui::draw(&view, rows, cols);
     }
@@ -415,6 +424,30 @@ impl State {
         }
     }
 
+    /// The other session answered with its panes: switch the client there, onto claude's pane.
+    ///
+    /// When the pane cannot be picked out — two claudes and neither in this directory — the switch
+    /// still happens, to the session, without a pane: the person asked to go there, and landing in
+    /// the right session with the wrong pane focused is closer than staying put.
+    fn jump_there(&mut self, json: &str, context: &BTreeMap<String, String>) {
+        let Some(name) = context.get("session") else { return };
+        let cwd = context.get("cwd").map(String::as_str).unwrap_or("");
+        match scan::claude_pane(json, cwd) {
+            Some((pane, tab)) => {
+                eprintln!("lvim-zclaude: switch to {name}, tab {tab}, pane {pane}");
+                self.last_error = None;
+                hide_self();
+                switch_session_with_focus(name, Some(tab), Some((pane, false)));
+            }
+            None => {
+                eprintln!("lvim-zclaude: switch to {name}, no claude pane matched {cwd:?}");
+                self.last_error = None;
+                hide_self();
+                switch_session_with_focus(name, None, None);
+            }
+        }
+    }
+
     fn move_cursor(&mut self, by: i64) -> bool {
         if self.shown.is_empty() {
             return false;
@@ -424,9 +457,7 @@ impl State {
         true
     }
 
-    /// Enter: go to where the session runs. A pane of this session is focused; a session that runs
-    /// under another zellij server is only named — switching there would move the *client*, which
-    /// is the one thing a board must not do behind the person's back (see the plan, step 12).
+    /// Enter: go to where the session runs — a pane here, or a pane in another zellij session.
     fn jump(&mut self) {
         let Some(row) = self.shown.get(self.cursor) else {
             eprintln!("lvim-zclaude: jump with no row under the cursor");
@@ -444,7 +475,21 @@ impl State {
             focus_pane_with_id(PaneId::Terminal(located.pane_id), true, false);
             hide_self();
         } else if let Some(name) = row.running.as_ref().and_then(|r| r.zellij_session.clone()) {
-            self.last_error = Some(format!("that session runs in zellij session {name}"));
+            // **Another zellij session: ask it where its claude is, then switch the client there.**
+            // The pane ids of another session are not in this plugin's manifest, so they are asked
+            // for with `list-panes`; the answer comes back as a `RunCommandResult` and
+            // `jump_there` finishes the job. The cwd goes along to pick the right pane when that
+            // session runs more than one claude.
+            let cwd = row.running.as_ref().map(|r| r.cwd.clone()).unwrap_or_else(|| row.cwd.clone());
+            self.last_error = Some(format!("going to {name}…"));
+            run_command(
+                &["zellij", "--session", &name, "action", "list-panes", "-a", "-j"],
+                BTreeMap::from([
+                    ("step".to_string(), "panes".to_string()),
+                    ("session".to_string(), name.clone()),
+                    ("cwd".to_string(), cwd),
+                ]),
+            );
         } else {
             self.last_error = Some("that session is not running".to_string());
         }

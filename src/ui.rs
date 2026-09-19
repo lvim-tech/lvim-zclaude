@@ -11,33 +11,67 @@
 // bytes as characters and tear every column out of line.
 
 use crate::model::Row;
+use zellij_tile::prelude::{PaletteColor, Styling};
 
-const RESET_FG: &str = "\u{1b}[39m";
 const BOLD: &str = "\u{1b}[1m";
 const UNBOLD: &str = "\u{1b}[22m";
-/// The selected row: a background, so the colours in it stay readable. Reverse video would flip
-/// every foreground with it and turn the whole line into one block.
-const SELECT_BG: &str = "\u{1b}[48;5;237m";
+const RESET_FG: &str = "\u{1b}[39m";
 const RESET_BG: &str = "\u{1b}[49m";
 
-// The palette, one place. 256-colour indices rather than the sixteen names, because the named ones
-// are whatever the terminal theme made of them and this board is read at a glance.
-const C_BUSY: u8 = 78; // green — working right now
-const C_IDLE: u8 = 179; // amber — running, waiting for you
-const C_STOPPED: u8 = 243; // grey — not running
-const C_BRANCH: u8 = 140; // violet
-const C_LAST: u8 = 245;
-const C_NAME: u8 = 80; // cyan
-const C_HERE: u8 = 78; // this session's pane — the one Enter can reach
-const C_THERE: u8 = 68; // another zellij session
-const C_NONE: u8 = 240;
-const C_COUNT: u8 = 244;
-const C_TITLE: u8 = 111;
-const C_DIM: u8 = 244;
-const C_ERROR: u8 = 203;
+/// **Every colour on the board comes from the active zellij theme**, which on this machine is
+/// generated from lvim-colorscheme — the board changes with the theme, the way `lvim-zbar` does, and
+/// owns no colour of its own.
+///
+/// The accents are read from `multiplayer_user_colors`, not from `text_unselected` and the rest,
+/// for `lvim-zbar`'s reason: the generator writes contrast-floored versions of the palette into the
+/// text slots and keeps the *raw* palette only there. On the `lvim` theme the players are
+/// `2` blue, `3` green, `5` violet, `6` teal, `8` yellow, `9` red, `10` a muted grey-green.
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub busy: PaletteColor,
+    pub idle: PaletteColor,
+    pub muted: PaletteColor,
+    pub branch: PaletteColor,
+    pub name: PaletteColor,
+    pub here: PaletteColor,
+    pub there: PaletteColor,
+    pub title: PaletteColor,
+    pub error: PaletteColor,
+    pub selected: PaletteColor,
+}
 
-fn fg(color: u8, text: &str) -> String {
-    format!("\u{1b}[38;5;{color}m{text}{RESET_FG}")
+impl Palette {
+    pub fn from_style(style: &Styling) -> Palette {
+        let players = style.multiplayer_user_colors;
+        Palette {
+            busy: players.player_3,
+            idle: players.player_8,
+            muted: players.player_10,
+            branch: players.player_5,
+            name: players.player_6,
+            here: players.player_3,
+            there: players.player_2,
+            title: players.player_2,
+            error: players.player_9,
+            selected: style.text_selected.background,
+        }
+    }
+}
+
+/// A colour as an escape for layer `38` (foreground) or `48` (background) — `lvim-zbar`'s `ansi()`.
+fn ansi(color: PaletteColor, layer: u8) -> String {
+    match color {
+        PaletteColor::Rgb((r, g, b)) => format!("\u{1b}[{layer};2;{r};{g};{b}m"),
+        PaletteColor::EightBit(n) => format!("\u{1b}[{layer};5;{n}m"),
+    }
+}
+
+/// Text in a theme colour — or plain, before zellij has said what the theme is.
+fn fg(color: Option<PaletteColor>, text: &str) -> String {
+    match color {
+        Some(color) => format!("{}{text}{RESET_FG}", ansi(color, 38)),
+        None => text.to_string(),
+    }
 }
 
 pub struct View<'a> {
@@ -50,6 +84,8 @@ pub struct View<'a> {
     pub files: usize,
     pub last_error: Option<&'a str>,
     pub permitted: bool,
+    /// `None` until the first `ModeUpdate` — the board then draws without colour rather than guess.
+    pub palette: Option<Palette>,
 }
 
 /// Cut to `width` **by characters**, with an ellipsis when something was cut.
@@ -75,11 +111,12 @@ fn pad(text: &str, width: usize) -> String {
 }
 
 pub fn draw(view: &View, rows_available: usize, cols: usize) {
+    let pal = view.palette;
     if !view.permitted {
         println!(
             "{BOLD}{}{UNBOLD}  {}",
-            fg(C_TITLE, "lvim-zclaude"),
-            fg(C_DIM, "waiting for permissions — answer the prompt with `y`")
+            fg(pal.map(|p| p.title), "lvim-zclaude"),
+            fg(pal.map(|p| p.muted), "waiting for permissions — answer the prompt with `y`")
         );
         return;
     }
@@ -96,10 +133,10 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
         .saturating_sub(left.chars().count() + filter.chars().count() + counts.chars().count() + 2);
     println!(
         "{BOLD}{}{UNBOLD} {}{}{}",
-        fg(C_TITLE, &left),
-        fg(C_NAME, &filter),
+        fg(pal.map(|p| p.title), &left),
+        fg(pal.map(|p| p.name), &filter),
         " ".repeat(gap + 1),
-        fg(C_DIM, &counts)
+        fg(pal.map(|p| p.muted), &counts)
     );
 
     if view.rows.is_empty() {
@@ -109,7 +146,7 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
         } else {
             "nothing matches the filter"
         };
-        println!("  {}", fg(C_DIM, message));
+        println!("  {}", fg(pal.map(|p| p.muted), message));
         footer(view, cols);
         return;
     }
@@ -134,7 +171,7 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
         header.push_str(&pad("WHERE", w_where));
     }
     header.push_str(&pad("N", w_n));
-    println!("{}", fg(C_DIM, &truncate(&header, cols)));
+    println!("{}", fg(pal.map(|p| p.muted), &truncate(&header, cols)));
 
     // The visible window follows the cursor.
     let body = rows_available.saturating_sub(4).max(1);
@@ -142,11 +179,11 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
     for (index, row) in view.rows.iter().enumerate().skip(first).take(body) {
         let selected = index == view.cursor;
         let mark = if selected { "▸" } else { " " };
-        let state = match &row.running {
-            Some(running) if running.busy => C_BUSY,
-            Some(_) => C_IDLE,
-            None => C_STOPPED,
-        };
+        let state = pal.map(|p| match &row.running {
+            Some(running) if running.busy => p.busy,
+            Some(_) => p.idle,
+            None => p.muted,
+        });
         let project = if row.child {
             format!("  {}", crate::model::age(view.now, row.last))
         } else {
@@ -159,15 +196,17 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
         };
         let count = if row.child { String::new() } else { format!("×{}", row.count) };
         let where_text = row.where_text(view.session_name);
-        let where_colour = if row.located.is_some() {
-            C_HERE
-        } else if row.running.is_some() {
-            C_THERE
-        } else {
-            C_NONE
-        };
+        let where_colour = pal.map(|p| {
+            if row.located.is_some() {
+                p.here
+            } else if row.running.is_some() {
+                p.there
+            } else {
+                p.muted
+            }
+        });
         // A child is one of the older sessions; it is there to be read past, not at.
-        let project_colour = if row.child { C_DIM } else { state };
+        let project_colour = pal.map(|p| p.muted);
 
         let mut line = format!(
             "{} {}{}{}{}",
@@ -178,36 +217,38 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
             } else {
                 format!("{BOLD}{}{UNBOLD}", pad(&project, w_project))
             },
-            fg(C_BRANCH, &pad(&row.branch, w_branch)),
-            fg(C_LAST, &pad(&crate::model::age(view.now, row.last), w_last))
+            fg(pal.map(|p| p.branch), &pad(&row.branch, w_branch)),
+            fg(pal.map(|p| p.muted), &pad(&crate::model::age(view.now, row.last), w_last))
         );
         if !narrow {
-            line.push_str(&fg(C_NAME, &pad(&name, w_name)));
+            line.push_str(&fg(pal.map(|p| p.name), &pad(&name, w_name)));
             line.push_str(&fg(where_colour, &pad(&where_text, w_where)));
         }
-        line.push_str(&fg(C_COUNT, &pad(&count, w_n)));
-        if selected {
-            println!("{SELECT_BG}{line}{RESET_BG}");
-        } else {
-            println!("{line}");
+        line.push_str(&fg(pal.map(|p| p.muted), &pad(&count, w_n)));
+        match (selected, pal) {
+            (true, Some(p)) => println!("{}{line}{RESET_BG}", ansi(p.selected, 48)),
+            // No theme yet: the one row that must stand out still does.
+            (true, None) => println!("\u{1b}[7m{line}\u{1b}[27m"),
+            _ => println!("{line}"),
         }
     }
 
     // The selected row's whole truth, which does not fit in the columns.
     if let Some(row) = view.rows.get(view.cursor) {
         let detail = truncate(&format!("  {} · {}", row.cwd, row.id), cols);
-        println!("{}", fg(C_DIM, &detail));
+        println!("{}", fg(pal.map(|p| p.muted), &detail));
     }
     footer(view, cols);
 }
 
 fn footer(view: &View, cols: usize) {
+    let pal = view.palette;
     if let Some(error) = view.last_error {
-        println!("{}", fg(C_ERROR, &truncate(&format!("  {error}"), cols)));
+        println!("{}", fg(pal.map(|p| p.error), &truncate(&format!("  {error}"), cols)));
         return;
     }
     let keys = "↑↓ move · Enter jump · Tab expand · type to filter · r refresh · Esc close";
-    println!("{}", fg(C_DIM, &truncate(keys, cols)));
+    println!("{}", fg(pal.map(|p| p.muted), &truncate(keys, cols)));
 }
 
 #[cfg(test)]
@@ -238,8 +279,8 @@ mod tests {
     /// would take the selected row's background down with it.
     #[test]
     fn colour_wraps_a_padded_cell_without_changing_its_width() {
-        let cell = fg(C_NAME, &pad("bru", 6));
-        assert!(cell.starts_with("\u{1b}[38;5;80m"));
+        let cell = fg(Some(PaletteColor::Rgb((53, 123, 109))), &pad("bru", 6));
+        assert!(cell.starts_with("\u{1b}[38;2;53;123;109m"), "the theme's own RGB, as given");
         assert!(cell.ends_with(RESET_FG), "a foreground reset, not \\x1b[0m");
         assert!(!cell.contains("\u{1b}[0m"));
         let visible: String = {

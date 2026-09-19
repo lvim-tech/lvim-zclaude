@@ -245,6 +245,82 @@ pub fn field(json: &str, key: &str) -> Option<String> {
     }
 }
 
+/// The top-level objects of a JSON array, as slices — what `zellij action list-panes -j` answers.
+///
+/// A brace counter that respects strings, rather than a JSON crate: the objects are flat enough for
+/// [`field`] once they are apart, and a plugin that has to stay under a megabyte does not carry a
+/// parser for one call.
+pub fn objects(json: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start, mut in_string, mut escaped) = (0usize, 0usize, false, false);
+    for (at, c) in json.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = at;
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(&json[start..=at]);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The pane `claude` runs in, in another zellij session, from that session's `list-panes -a -j`:
+/// its pane id and its tab position.
+///
+/// Matched on the command **and** the directory, because a session can run two `claude`s — in two
+/// projects — and the one to jump to is the one whose cwd the board row carries. When no pane has
+/// that directory but exactly one runs `claude`, that one is it: a `cd` inside the pane moves its
+/// cwd and not the session file's.
+pub fn claude_pane(json: &str, cwd: &str) -> Option<(u32, usize)> {
+    let is_claude = |object: &str| {
+        field(object, "pane_command")
+            .map(|command| {
+                let program = command.split_whitespace().next().unwrap_or("");
+                program.rsplit('/').next().unwrap_or("") == "claude"
+            })
+            .unwrap_or(false)
+    };
+    let panes: Vec<&str> = objects(json)
+        .into_iter()
+        .filter(|object| field(object, "is_plugin").as_deref() != Some("true"))
+        .filter(|object| is_claude(object))
+        .collect();
+    let pick = |object: &str| -> Option<(u32, usize)> {
+        let id = field(object, "id")?.parse().ok()?;
+        let tab = field(object, "tab_position")?.parse().ok()?;
+        Some((id, tab))
+    };
+    if let Some(object) = panes
+        .iter()
+        .find(|object| field(object, "pane_cwd").as_deref() == Some(cwd))
+    {
+        return pick(object);
+    }
+    if panes.len() == 1 {
+        return pick(panes[0]);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,4 +400,38 @@ mod tests {
     fn script_with(head: &[String]) -> String {
         script("$HOME/.claude", head, &[])
     }
+
+    /// The shape `zellij action list-panes -a -j` answered for the EXAMS session on 2026-09-19,
+    /// trimmed to the fields that matter plus one nested value, which is what the brace counter is
+    /// there to survive.
+    const PANES: &str = r#"[
+      {"id":2,"is_plugin":true,"plugin_url":"zellij:status-bar","tab_position":0},
+      {"id":0,"is_plugin":false,"tab_position":0,"tab_name":"Tab #1","pane_command":"claude --continue","pane_cwd":"/mnt/dev/apps/school-exams","cursor_coordinates_in_pane":[3,4],"title":"✳ School-exams {tasks}"},
+      {"id":4,"is_plugin":false,"tab_position":0,"pane_command":"secmon-tui","pane_cwd":"/mnt/dev/apps/school-exams"},
+      {"id":7,"is_plugin":false,"tab_position":2,"pane_command":"/usr/bin/claude","pane_cwd":"/mnt/dev/rust/bru"}
+    ]"#;
+
+    #[test]
+    fn a_json_array_splits_into_its_objects_through_strings_and_nesting() {
+        let objects = objects(PANES);
+        assert_eq!(objects.len(), 4, "a brace inside a title string is not a brace");
+        assert!(objects[1].contains("\"pane_command\":\"claude --continue\""));
+        assert_eq!(field(objects[3], "id").as_deref(), Some("7"));
+    }
+
+    /// **Command and directory together**, because one zellij session can run two claudes.
+    #[test]
+    fn the_claude_pane_is_found_by_command_and_directory() {
+        assert_eq!(claude_pane(PANES, "/mnt/dev/apps/school-exams"), Some((0, 0)));
+        assert_eq!(claude_pane(PANES, "/mnt/dev/rust/bru"), Some((7, 2)), "a full path is claude too");
+        // Two claudes and neither in this directory: no guess.
+        assert_eq!(claude_pane(PANES, "/somewhere/else"), None);
+        // One claude and a directory that moved under it: that one.
+        let one = r#"[{"id":5,"is_plugin":false,"tab_position":1,"pane_command":"claude","pane_cwd":"/moved"}]"#;
+        assert_eq!(claude_pane(one, "/original"), Some((5, 1)));
+        // A secmon pane in the right directory is not a claude pane.
+        let none = r#"[{"id":4,"is_plugin":false,"tab_position":0,"pane_command":"secmon-tui","pane_cwd":"/d"}]"#;
+        assert_eq!(claude_pane(none, "/d"), None);
+    }
+
 }
