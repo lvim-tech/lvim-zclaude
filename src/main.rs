@@ -96,6 +96,17 @@ impl Default for Geometry {
 }
 
 impl Geometry {
+    /// What zellij gives a floating pane when nobody says otherwise: half the screen, centred.
+    /// Measured on this machine — a 53x222 screen opens one at 26x111.
+    fn zellij_default() -> Geometry {
+        Geometry {
+            x: "25%".to_string(),
+            y: "25%".to_string(),
+            width: "50%".to_string(),
+            height: "50%".to_string(),
+        }
+    }
+
     fn from_config(configuration: &BTreeMap<String, String>) -> Geometry {
         let get = |key: &str, fallback: &str| {
             configuration
@@ -1019,6 +1030,11 @@ impl State {
     /// Answering stops with it: no digit may go anywhere from a board nobody sees.
     fn hide(&mut self) {
         eprintln!("lvim-zclaude: hide");
+        // **Give the size back before going away.** zellij hands a new floating pane the geometry
+        // of the last one, so a board that leaves at 80%x70% makes the next thing opened — the
+        // session manager, say — come up that big. Shrinking to zellij's own default on the way
+        // out leaves nothing of ours behind; `show` sizes the board again anyway.
+        size_self(&Geometry::zellij_default());
         self.visible = false;
         self.hiding = true;
         self.answering = false;
@@ -1708,8 +1724,25 @@ impl State {
                 self.rebuild();
                 true
             }
-            // A digit: the Nth agent or transcript on the board, and straight to it.
+            // **A digit answers the buttons that are on the screen, and jumps when there are
+            // none.** The buttons under the list are numbered `[1] Yes  [2] …`, so a digit
+            // pressed while they are there means one of them — asking for a key to arm them
+            // first only taught people that the buttons do not work (2026-09-20, three times).
+            // With no question under the cursor the digit is what it always was: go to the Nth
+            // row. Nothing is answered unless the board can see the question it is answering.
             BareKey::Char(c @ '1'..='9') if !typing => {
+                let answers = self
+                    .peek
+                    .as_ref()
+                    .filter(|peek| self.current().is_some_and(|row| row.id == peek.id))
+                    .and_then(|peek| peek.question.as_ref())
+                    .is_some_and(|question| {
+                        question.options.iter().any(|(n, _)| (*n + b'0') as char == c)
+                    });
+                if answers {
+                    self.answering = true;
+                    return self.answer_key(&key, ctrl);
+                }
                 let nth = c as usize - '1' as usize;
                 let at = self.shown.iter().enumerate().filter(|(_, row)| !row.is_header()).nth(nth);
                 if let Some((at, _)) = at {

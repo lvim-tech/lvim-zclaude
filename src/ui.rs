@@ -434,7 +434,9 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
             (nth <= 9).then_some(nth)
         });
     }
+    let mut drawn = 0usize;
     for (index, row) in view.rows.iter().enumerate().skip(first).take(body) {
+        drawn += 1;
         let selected = index == view.cursor;
         // A heading: the zellij session (or the stopped block) and what is under it — `▾` open,
         // `▸` folded. Selected, it is marked and backed like any other selected row.
@@ -539,6 +541,13 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
         }
     }
 
+    // **The keys live at the foot of the pane, not under the last row.** A short list left them
+    // floating in the middle of an empty board; zellij's own plugins put their help on the last
+    // line and the eye goes looking for it there.
+    for _ in drawn..body {
+        println!();
+    }
+
     // The selected row's whole truth, which does not fit in the columns — and what its agent is
     // doing, which is the pane's own title and nothing out of the transcript.
     if let Some(row) = view.rows.get(view.cursor).filter(|row| !row.is_header()) {
@@ -638,12 +647,19 @@ fn draw_preview(view: &View, preview: &PreviewView, rows_available: usize, cols:
 
 /// `[k]` in the accent, the rest in grey — for the footer, where the brackets are the only thing
 /// that says which character to press.
+/// One key in the help line, in the shape zellij's own plugins use: `<Esc> - hide`.
 fn keycap(pal: Option<Palette>, key: &str, what: &str) -> String {
     format!(
         "{}{}",
-        fg(pal.map(|p| p.key), &format!("[{key}]")),
-        fg(pal.map(|p| p.muted), what)
+        fg(pal.map(|p| p.key), &format!("<{key}>")),
+        fg(pal.map(|p| p.muted), &format!(" - {}", what.trim()))
     )
+}
+
+/// The help line itself: `Help: <a> - answer, <v> - terminal, …`.
+fn help_line(pal: Option<Palette>, keys: &[(&str, &str)]) -> String {
+    let caps: Vec<String> = keys.iter().map(|(key, what)| keycap(pal, key, what)).collect();
+    format!("{}{}", fg(pal.map(|p| p.heading), "Help: "), caps.join(&fg(pal.map(|p| p.muted), ", ")))
 }
 
 fn footer(view: &View, cols: usize) {
@@ -709,17 +725,16 @@ fn footer(view: &View, cols: usize) {
             ("Esc", " hide"),
         ]
     };
-    let line: String = keys.iter().map(|(key, what)| keycap(pal, key, what)).collect();
     // Narrow pane: the keys that act, without the words.
     if cols < 70 {
-        let short: String = keys
+        let short: Vec<String> = keys
             .iter()
-            .map(|(key, _)| fg(pal.map(|p| p.key), &format!("[{key}]")))
+            .map(|(key, _)| fg(pal.map(|p| p.key), &format!("<{key}>")))
             .collect();
-        println!("  {short}");
+        println!("  {}", short.join(" "));
         return;
     }
-    println!("  {line}");
+    println!("  {}", help_line(pal, keys));
 }
 
 #[cfg(test)]
