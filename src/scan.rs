@@ -62,6 +62,13 @@ for q in $(printf '%s\n' $zpids | sort -u); do
     *zellij) [ "$a1" = "--server" ] && printf 'Z\t%s\t%s\n' "$q" "${a2##*/}" ;;
   esac
 done
+for q in $(printf '%s\n' $zpids | sort -u); do
+  c=$(tr '\0' '\n' < "/proc/$q/cmdline" 2>/dev/null)
+  a0=$(printf '%s\n' "$c" | sed -n 1p); a1=$(printf '%s\n' "$c" | sed -n 2p); a2=$(printf '%s\n' "$c" | sed -n 3p)
+  case "$a0" in
+    *zellij) [ "$a1" = "--server" ] && printf 'P\t%s\t%s\n' "${a2##*/}" "$(zellij --session "${a2##*/}" action list-panes -a -j 2>/dev/null </dev/null | tr -d '\n')" ;;
+  esac
+done
 "#;
 
 /// The script with the two lists put in.
@@ -109,6 +116,91 @@ pub struct Running {
     pub ancestors: Vec<i32>,
     /// The zellij server in the chain, if the session runs under one.
     pub zellij_session: Option<String>,
+    /// The pane it runs in, in *that* zellij session — from that session's `list-panes` (the `P`
+    /// lines), matched by `claude_pane`. Filled by the board after the parse, not here, because
+    /// the match needs the cwd. `None` when the session is not under zellij, or the pane could not
+    /// be told apart.
+    pub pane: Option<RemotePane>,
+    /// What the session's Claude Code hooks said last — waiting for a person, or done with its
+    /// turn — when `hooks/lvim-zclaude-hook.sh` is installed. `None`: working, or no hooks.
+    pub hook: Option<Hook>,
+}
+
+/// A word from a Claude Code hook about one session. `sessions/<pid>.json` knows only busy and
+/// idle; "waiting for you" — a permission prompt, a question — exists nowhere else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hook {
+    pub state: HookState,
+    /// The `notification_type` behind it (`permission_prompt`, `elicitation_dialog`, …), or the
+    /// hook's name for `done` (`Stop`, `idle_prompt`).
+    pub kind: String,
+    /// When, in seconds since the epoch.
+    pub at: u64,
+    /// What the notification said (`message` of a `Notification` hook: "Claude needs your
+    /// permission to use Bash"), on one line. Empty for `Stop`. **This is the agent's own word to
+    /// the person, not a line of the conversation** — the same text the desktop notification
+    /// carries.
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookState {
+    /// Needs a person: a permission, an answer.
+    Waiting,
+    /// Finished its turn and nobody has replied yet.
+    Done,
+}
+
+/// One event from the hook script, as its pipe payload says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookEvent {
+    pub session_id: String,
+    /// `None`: the session is working again — whatever was waiting or done is over.
+    pub hook: Option<Hook>,
+    pub cwd: String,
+    /// This board is the one that should tell the desktop (the hook picks exactly one).
+    pub notify: bool,
+}
+
+/// The payload of a `lvim-zclaude-event` pipe:
+/// `session_id \t state \t kind \t cwd \t epoch \t notify [\t message]` — the shape
+/// `hooks/lvim-zclaude-hook.sh` writes. `state` is `waiting`, `done` or `working`. Anything
+/// short or unknown is `None`: a stray pipe must not invent an agent. The seventh field is the
+/// notification's own text, and a payload without it (an older hook script) still works.
+pub fn hook_event(payload: &str) -> Option<HookEvent> {
+    let parts: Vec<&str> = payload.trim_end_matches('\n').split('\t').collect();
+    if parts.len() < 5 || parts[0].is_empty() {
+        return None;
+    }
+    let at = parts[4].trim().parse().unwrap_or(0);
+    let kind = parts[2].trim().to_string();
+    let message = parts.get(6).map(|m| m.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
+    let hook = match parts[1].trim() {
+        "waiting" => Some(Hook { state: HookState::Waiting, kind, at, message }),
+        "done" => Some(Hook { state: HookState::Done, kind, at, message }),
+        "working" => None,
+        _ => return None,
+    };
+    Some(HookEvent {
+        session_id: parts[0].trim().to_string(),
+        hook,
+        cwd: parts[3].trim().to_string(),
+        notify: parts.get(5).map(|n| n.trim() == "1").unwrap_or(false),
+    })
+}
+
+/// A `claude` pane in another zellij session, as `list-panes -a -j` describes it: enough to write
+/// into it, close it, jump to it, and say what it is doing (its title, which Claude keeps current).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemotePane {
+    pub id: u32,
+    /// The tab's position — what `switch_session_with_focus` and the `TAB` column use.
+    pub tab: usize,
+    /// The tab's id — what `new-pane --tab-id` takes. Positions shift when tabs are moved or
+    /// closed; ids do not. Falls back to the position when the answer has no `tab_id`.
+    pub tab_id: u32,
+    pub tab_name: String,
+    pub title: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -120,6 +212,9 @@ pub struct Scan {
     /// `sessionId` → branch, from `tail`.
     pub branches: Vec<(String, String)>,
     pub running: Vec<Running>,
+    /// zellij session name → its `list-panes -a -j`, on one line, for every zellij session that
+    /// hosts a running claude (the `P` lines). ~10 KB and ~10 ms a session, measured 2026-09-20.
+    pub panes: Vec<(String, String)>,
 }
 
 /// Read the scanner's output.
@@ -198,6 +293,8 @@ pub fn parse(out: &str) -> Scan {
                         .unwrap_or(0),
                     ancestors: chain.clone(),
                     zellij_session: None,
+                    pane: None,
+                    hook: None,
                 };
                 raw_running.push((running, chain));
             }
@@ -205,6 +302,13 @@ pub fn parse(out: &str) -> Scan {
                 if let (Some(pid), Some(name)) = (parts.next(), parts.next()) {
                     if let Ok(pid) = pid.parse() {
                         servers.push((pid, name.to_string()));
+                    }
+                }
+            }
+            Some("P") => {
+                if let (Some(name), Some(json)) = (parts.next(), parts.next()) {
+                    if !name.is_empty() && json.trim_start().starts_with('[') {
+                        scan.panes.push((name.to_string(), json.to_string()));
                     }
                 }
             }
@@ -284,13 +388,13 @@ pub fn objects(json: &str) -> Vec<&str> {
 }
 
 /// The pane `claude` runs in, in another zellij session, from that session's `list-panes -a -j`:
-/// its pane id and its tab position.
+/// its pane id, its tab, and its title.
 ///
 /// Matched on the command **and** the directory, because a session can run two `claude`s — in two
 /// projects — and the one to jump to is the one whose cwd the board row carries. When no pane has
 /// that directory but exactly one runs `claude`, that one is it: a `cd` inside the pane moves its
 /// cwd and not the session file's.
-pub fn claude_pane(json: &str, cwd: &str) -> Option<(u32, usize)> {
+pub fn claude_pane(json: &str, cwd: &str) -> Option<RemotePane> {
     let is_claude = |object: &str| {
         field(object, "pane_command")
             .map(|command| {
@@ -304,10 +408,16 @@ pub fn claude_pane(json: &str, cwd: &str) -> Option<(u32, usize)> {
         .filter(|object| field(object, "is_plugin").as_deref() != Some("true"))
         .filter(|object| is_claude(object))
         .collect();
-    let pick = |object: &str| -> Option<(u32, usize)> {
+    let pick = |object: &str| -> Option<RemotePane> {
         let id = field(object, "id")?.parse().ok()?;
         let tab = field(object, "tab_position")?.parse().ok()?;
-        Some((id, tab))
+        Some(RemotePane {
+            id,
+            tab,
+            tab_id: field(object, "tab_id").and_then(|t| t.parse().ok()).unwrap_or(tab as u32),
+            tab_name: field(object, "tab_name").unwrap_or_else(|| format!("Tab {}", tab + 1)),
+            title: field(object, "title").unwrap_or_default(),
+        })
     };
     if let Some(object) = panes
         .iter()
@@ -319,6 +429,18 @@ pub fn claude_pane(json: &str, cwd: &str) -> Option<(u32, usize)> {
         return pick(panes[0]);
     }
     None
+}
+
+/// The id of the tab a terminal pane is in, from a session's `list-panes -a -j` — for a pane
+/// this plugin knows by id from its own manifest, which names tabs by position only. `None` when
+/// the pane is not in the answer or the answer carries no `tab_id` (an older zellij).
+pub fn tab_id_of(json: &str, pane_id: u32) -> Option<u32> {
+    objects(json)
+        .into_iter()
+        .filter(|object| field(object, "is_plugin").as_deref() != Some("true"))
+        .find(|object| field(object, "id").and_then(|id| id.parse::<u32>().ok()) == Some(pane_id))
+        .and_then(|object| field(object, "tab_id"))
+        .and_then(|id| id.parse().ok())
 }
 
 #[cfg(test)]
@@ -347,9 +469,13 @@ mod tests {
              H\t23aa89d8-216f\t/mnt/dev/bru\n\
              B\t23aa89d8-216f\tmain\n\
              R\t295646\t3502756\t295600,779771,1\t/usr/bin/claude\t{SESSION_JSON}\n\
-             Z\t779771\tRUST\n"
+             Z\t779771\tRUST\n\
+             P\tRUST\t[{{\"id\":3,\"is_plugin\":false}}]\n\
+             P\tGONE\t\n"
         );
         let scan = parse(&out);
+        assert_eq!(scan.panes.len(), 1, "a session that answered nothing has no panes");
+        assert_eq!(scan.panes[0].0, "RUST");
         assert_eq!(scan.now, 1789000000);
         assert_eq!(scan.files.len(), 2);
         assert_eq!(scan.files[0].id, "23aa89d8-216f");
@@ -406,7 +532,7 @@ mod tests {
     /// there to survive.
     const PANES: &str = r#"[
       {"id":2,"is_plugin":true,"plugin_url":"zellij:status-bar","tab_position":0},
-      {"id":0,"is_plugin":false,"tab_position":0,"tab_name":"Tab #1","pane_command":"claude --continue","pane_cwd":"/mnt/dev/apps/school-exams","cursor_coordinates_in_pane":[3,4],"title":"✳ School-exams {tasks}"},
+      {"id":0,"is_plugin":false,"tab_id":7,"tab_position":0,"tab_name":"Tab #1","pane_command":"claude --continue","pane_cwd":"/mnt/dev/apps/school-exams","cursor_coordinates_in_pane":[3,4],"title":"✳ School-exams {tasks}"},
       {"id":4,"is_plugin":false,"tab_position":0,"pane_command":"secmon-tui","pane_cwd":"/mnt/dev/apps/school-exams"},
       {"id":7,"is_plugin":false,"tab_position":2,"pane_command":"/usr/bin/claude","pane_cwd":"/mnt/dev/rust/bru"}
     ]"#;
@@ -422,16 +548,63 @@ mod tests {
     /// **Command and directory together**, because one zellij session can run two claudes.
     #[test]
     fn the_claude_pane_is_found_by_command_and_directory() {
-        assert_eq!(claude_pane(PANES, "/mnt/dev/apps/school-exams"), Some((0, 0)));
-        assert_eq!(claude_pane(PANES, "/mnt/dev/rust/bru"), Some((7, 2)), "a full path is claude too");
+        let exams = claude_pane(PANES, "/mnt/dev/apps/school-exams").unwrap();
+        assert_eq!((exams.id, exams.tab), (0, 0));
+        assert_eq!(exams.tab_name, "Tab #1");
+        assert_eq!(exams.tab_id, 7, "the tab's id, for `new-pane --tab-id`");
+        assert_eq!(exams.title, "✳ School-exams {tasks}", "the title is what the agent is doing");
+        let bru = claude_pane(PANES, "/mnt/dev/rust/bru").unwrap();
+        assert_eq!((bru.id, bru.tab), (7, 2), "a full path is claude too");
+        assert_eq!(bru.tab_name, "Tab 3", "no tab name in the answer: the position, as zellij shows it");
+        assert_eq!(bru.tab_id, 2, "no tab id in the answer: the position stands in");
+        assert_eq!(bru.title, "");
         // Two claudes and neither in this directory: no guess.
         assert_eq!(claude_pane(PANES, "/somewhere/else"), None);
         // One claude and a directory that moved under it: that one.
         let one = r#"[{"id":5,"is_plugin":false,"tab_position":1,"pane_command":"claude","pane_cwd":"/moved"}]"#;
-        assert_eq!(claude_pane(one, "/original"), Some((5, 1)));
+        assert_eq!(claude_pane(one, "/original").map(|p| (p.id, p.tab)), Some((5, 1)));
         // A secmon pane in the right directory is not a claude pane.
         let none = r#"[{"id":4,"is_plugin":false,"tab_position":0,"pane_command":"secmon-tui","pane_cwd":"/d"}]"#;
         assert_eq!(claude_pane(none, "/d"), None);
     }
 
+    /// The hook script's payload, and the two things that must not become an event: a short
+    /// line, and a state nobody defined.
+    #[test]
+    fn a_hook_payload_becomes_an_event() {
+        let waiting = hook_event("23aa-89d8\twaiting\tpermission_prompt\t/mnt/dev/bru\t1789000000\t1\tClaude needs your  permission to use Bash\n").unwrap();
+        assert_eq!(waiting.session_id, "23aa-89d8");
+        assert_eq!(
+            waiting.hook,
+            Some(Hook {
+                state: HookState::Waiting,
+                kind: "permission_prompt".into(),
+                at: 1789000000,
+                message: "Claude needs your permission to use Bash".into(),
+            })
+        );
+        assert_eq!(waiting.cwd, "/mnt/dev/bru");
+        assert!(waiting.notify);
+        let done = hook_event("23aa-89d8\tdone\tStop\t/mnt/dev/bru\t1789000001\t0").unwrap();
+        assert_eq!(done.hook.as_ref().map(|h| h.state), Some(HookState::Done));
+        assert_eq!(done.hook.unwrap().message, "", "an older hook script: six fields, no message");
+        assert!(!done.notify, "another board tells the desktop");
+        let working = hook_event("23aa-89d8\tworking\tUserPromptSubmit\t/mnt/dev/bru\t1789000002").unwrap();
+        assert_eq!(working.hook, None, "working clears whatever was there");
+        assert!(!working.notify, "no sixth field: no notification");
+        assert_eq!(hook_event("23aa-89d8\tblocked\tx\t/d\t1"), None, "a state nobody defined");
+        assert_eq!(hook_event("hints_set"), None, "a stray broadcast");
+        assert_eq!(hook_event("\twaiting\tk\t/d\t1\t1"), None, "no session id");
+    }
+
+    /// A pane this session knows by id (from the manifest) is given its tab's id by the same
+    /// `list-panes` answer — the manifest has positions only, `new-pane --tab-id` wants ids.
+    #[test]
+    fn a_local_pane_learns_its_tab_id_from_list_panes() {
+        assert_eq!(tab_id_of(PANES, 0), Some(7));
+        assert_eq!(tab_id_of(PANES, 4), None, "no tab_id in that object");
+        assert_eq!(tab_id_of(PANES, 99), None, "no such pane");
+        // A plugin pane with that id is not a terminal pane.
+        assert_eq!(tab_id_of(PANES, 2), None);
+    }
 }

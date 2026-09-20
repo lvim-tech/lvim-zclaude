@@ -1,20 +1,50 @@
 // lvim-zclaude — the lvim-zpm manifest. The board of Claude Code sessions: which exist, which one
 // is running, and a jump to the pane it runs in. One keybind, tmux mode:
-//   Ctrl s, then a  — open (or focus) the board as a floating pane
+//   Ctrl s, then a  — open the board as a floating pane (or focus it, if it is already open)
 // `{{wasm}}` becomes the absolute `file:` URL of the built wasm below.
 //
-// The three permissions, and why each is needed:
+// The four permissions, and why each is needed:
 //   ReadApplicationState   — the pane manifest, the tabs, and `get_pane_pid`, which is how a
 //                            running `claude` is matched to the pane it lives in.
-//   ChangeApplicationState — focusing that pane, naming and sizing the board's own floating pane.
-//   RunCommands            — the one `sh -c` scan. A plugin is WASI in a sandbox and cannot read
-//                            `~/.claude` itself; nothing else in this plugin shells out.
+//   ChangeApplicationState — focusing that pane, closing it (`X`), naming, sizing, hiding and
+//                            showing the board's own floating pane.
+//   RunCommands            — the one `sh -c` scan, the `kill` behind `S`, and the pane `N` opens.
+//                            A plugin is WASI in a sandbox and cannot read `~/.claude` itself.
+//   WriteToStdin           — `i`: the line typed on the board is written into the agent's pane,
+//                            exactly as if it had been typed there.
+//
+// The key sends the board a MESSAGE (`MessagePlugin … name "open"`) rather than launching it
+// (`LaunchOrFocusPlugin`), and `Esc` hides the board rather than closing it. A launched or
+// re-floated pane always appears at zellij's default size first and is resized by the plugin a
+// moment later — that is the flash. A hidden pane is shown by the plugin itself at its own size
+// in one step, so nothing else is ever drawn. `src/main.rs` (`show`) has the zellij line numbers.
+//
+// **For the very first opening of a session to be flash-free too**, the board has to exist,
+// hidden, before the key is pressed. That is what `load_plugins` in `~/.config/zellij/config.kdl`
+// does (the same way lvim-winnav and lvim-zsession are preloaded there):
+//   load_plugins {
+//       "file:/mnt/development/biserstoilov/rust/lvim-zclaude/lvim-zclaude.wasm"
+//   }
+// Without it, the first `open` of a session launches the board (one flash), and every opening
+// after that is silent. zpm does not manage `load_plugins`; it is read at session start only.
+//
+// Size and place, as shares of the screen (defaults 10%/15%/80%/70%): in the `payload` of the
+// message —
+//   bind "a" { MessagePlugin "{{wasm}}" { name "open"; payload "width=90%,height=80%"; }; … }
+// or as the plugin's configuration in `load_plugins` (`x`, `y`, `width`, `height`). NOT as
+// children of `LaunchOrFocusPlugin`: those reach the plugin as its configuration (checked in
+// zellij-utils, `parse_plugin_user_configuration`) — they work, but only when the board is
+// launched that way, which is the way that flashes.
 plugin {
     wasm "lvim-zclaude.wasm"
-    permissions "ReadApplicationState" "ChangeApplicationState" "RunCommands"
+    permissions "ReadApplicationState" "ChangeApplicationState" "RunCommands" "WriteToStdin"
     keybinds {
         tmux {
-            bind "a" { LaunchOrFocusPlugin "{{wasm}}" { floating true; move_to_focused_tab true; }; SwitchToMode "normal"; }
+            // `summary_pipe "on"`: the fleet line is broadcast to the session's other plugins as
+            // `lvim-zclaude-summary`, which is what lvim-zbar's `✳ 3 agents · 1 waiting` reads.
+            // A configuration given here reaches the board only when it is launched from this
+            // key; the durable place for it is the `load_plugins` entry in `config.kdl`.
+            bind "a" { MessagePlugin "{{wasm}}" { name "open"; floating true; summary_pipe "on"; }; SwitchToMode "normal"; }
         }
     }
 }
