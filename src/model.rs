@@ -577,45 +577,68 @@ pub fn question(lines: &[String]) -> Option<Question> {
     Some(Question { text, options })
 }
 
-/// The last `count` lines the agent *said*, without the box — for the row under the cursor.
-///
-/// **The bottom of a Claude Code screen is not what it did; it is where you type.** The input box,
-/// the line of hints under it and the spinner sit below the last real output, so taking the last
-/// non-blank lines showed `› do the commits` — the person's own half-typed line — instead of the
-/// work. Everything that belongs to the prompt is walked past first; what is left is the tail of
-/// the conversation, tool lines (`⎿`) included, because those ARE the last actions.
-pub fn tail(lines: &[String], count: usize) -> Vec<String> {
-    // Only the walk up from the bottom uses this: once a real line is found, everything above it
-    // is the conversation and is kept as it is — a `❯` there is an option of a prompt, not furniture.
-    let is_prompt_furniture = |line: &str| {
-        line.is_empty()
-            || line.starts_with('╰')
-            || line.starts_with('╭')
-            || line.starts_with('─')
-            || line.starts_with('›')
-            || line == "❯"
-            || line == "|"
-            || line.starts_with("⏸")
-            || line.starts_with("esc to")
-            || line.contains("Tip:")
-            || line.contains("auto-compact")
-            || line.contains("shift+tab")
-            || line.contains("for agents")
-            || line.contains("to interrupt")
-    };
+/// Only the walk up from the bottom of a screen uses this: once a real line is found, everything
+/// above it is the conversation and is kept as it is — a `❯` there is an option of a prompt, not
+/// furniture.
+fn prompt_furniture(line: &str) -> bool {
+    line.is_empty()
+        || line.starts_with('╰')
+        || line.starts_with('╭')
+        || line.starts_with('─')
+        || line.starts_with('›')
+        || line == "❯"
+        || line == "|"
+        || line.starts_with("⏸")
+        || line.starts_with("esc to")
+        || line.contains("Tip:")
+        || line.contains("auto-compact")
+        || line.contains("shift+tab")
+        || line.contains("for agents")
+        || line.contains("to interrupt")
+}
+
+/// The screen without its box and without the prompt at the foot: what the agent said.
+fn said(lines: &[String]) -> Vec<String> {
     let cleaned: Vec<String> = lines.iter().map(|line| unframed(line)).collect();
     let mut end = cleaned.len();
-    while end > 0 && is_prompt_furniture(&cleaned[end - 1]) {
+    while end > 0 && prompt_furniture(&cleaned[end - 1]) {
         end -= 1;
     }
-    let mut out: Vec<String> = cleaned[..end]
-        .iter()
-        .rev()
-        .filter(|line| !line.is_empty() && !line.starts_with('╰') && !line.starts_with('╭'))
-        .take(count)
-        .cloned()
-        .collect();
-    out.reverse();
+    cleaned[..end].to_vec()
+}
+
+/// The last `count` **blocks** of what the agent said — a block being what a blank line separates,
+/// which is one thing it did: a message, a tool call with its result, a thought.
+///
+/// Three lines were the first cut of this and they cut through the middle of a sentence as often
+/// as not; a block is the unit a person reads. `max_lines` keeps a long block from eating the
+/// list: the oldest block goes first, and a single block longer than the cap is shown by its
+/// last lines.
+pub fn tail_blocks(lines: &[String], count: usize, max_lines: usize) -> Vec<String> {
+    let said = said(lines);
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    for line in said {
+        if line.is_empty() {
+            if blocks.last().is_some_and(|block| !block.is_empty()) {
+                blocks.push(Vec::new());
+            }
+        } else {
+            if blocks.last().is_none() {
+                blocks.push(Vec::new());
+            }
+            blocks.last_mut().expect("a block was just pushed").push(line);
+        }
+    }
+    blocks.retain(|block| !block.is_empty());
+    let mut out: Vec<String> = Vec::new();
+    for block in blocks.iter().rev().take(count) {
+        let mut block = block.clone();
+        block.extend(out);
+        out = block;
+    }
+    while out.len() > max_lines {
+        out.remove(0);
+    }
     out
 }
 
@@ -909,11 +932,12 @@ mod tests {
     }
 
     #[test]
-    fn the_tail_of_a_screen_is_its_last_lines_without_the_frame() {
+    fn the_tail_of_a_screen_is_its_last_blocks_without_the_frame() {
         let lines: Vec<String> = PERMISSION_PROMPT.lines().map(str::to_string).collect();
-        let last = tail(&lines, 3);
-        assert_eq!(last, ["2. Yes, and don't ask again for cargo build commands in", "/mnt/dev/bru", "3. No, and tell Claude what to do differently (esc)"]);
-        assert_eq!(tail(&[], 3), Vec::<String>::new());
+        let last = tail_blocks(&lines, 3, 10);
+        assert!(last.iter().any(|line| line.contains("Do you want to proceed?")), "{last:?}");
+        assert!(last.last().is_some_and(|line| line.contains("3. No")), "{last:?}");
+        assert_eq!(tail_blocks(&[], 3, 10), Vec::<String>::new());
     }
 
     /// **The line under a prompt is not an option.** `Esc to cancel · Tab to amend` is written
@@ -942,7 +966,7 @@ mod tests {
     /// **What the agent did, not where you type.** An idle screen ends with the input box, the
     /// hints under it and whatever is half-typed there; none of that is the agent's last word.
     #[test]
-    fn the_tail_walks_past_the_input_box() {
+    fn the_blocks_walk_past_the_input_box() {
         let screen = "\
 ● Reloaded in ROOT.
 
@@ -958,13 +982,14 @@ mod tests {
 ";
         let lines: Vec<String> = screen.lines().map(str::to_string).collect();
         assert_eq!(
-            tail(&lines, 3),
+            tail_blocks(&lines, 3, 10),
             [
+                "● Reloaded in ROOT.",
                 "Ran 1 shell command",
                 "⎿  $ zellij action start-or-reload-plugin",
                 "✻ Brewed for 58s · done 5:51 PM"
             ],
-            "the typed line and the hints under the box are not what the agent said"
+            "three blocks, however many lines they are — and not the typed line or the hints"
         );
 
         // An agent waiting with nothing typed shows a bare `❯` and its own hint line; neither is
@@ -978,7 +1003,7 @@ mod tests {
   ‖ manual mode on · ? for shortcuts · ← for agents
 ";
         let lines: Vec<String> = idle.lines().map(str::to_string).collect();
-        assert_eq!(tail(&lines, 3), ["● Reloaded in ROOT."]);
+        assert_eq!(tail_blocks(&lines, 3, 10), ["● Reloaded in ROOT."]);
     }
 
     /// **The other two orders.** By project: a heading per project (its directory on it), the

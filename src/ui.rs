@@ -225,7 +225,7 @@ pub fn peek_height(peek: Option<&PeekView>) -> usize {
         Some(peek) => match peek.question {
             Some(_) if peek.answering => 3,
             Some(_) => 2,
-            None => peek.tail.len().min(3),
+            None => peek.tail.len().min(crate::PEEK_MAX_LINES),
         },
     }
 }
@@ -568,7 +568,7 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
 fn draw_peek(view: &View, peek: &PeekView, cols: usize) {
     let pal = view.palette;
     let Some(question) = peek.question else {
-        for line in peek.tail.iter().rev().take(3).collect::<Vec<_>>().into_iter().rev() {
+        for line in peek.tail.iter().rev().take(crate::PEEK_MAX_LINES).collect::<Vec<_>>().into_iter().rev() {
             println!(
                 "  {} {}",
                 fg(pal.map(|p| p.key), "▏"),

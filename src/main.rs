@@ -46,6 +46,10 @@ use scan::{Hook, HookState, Running, SessionFile};
 use std::collections::{BTreeMap, BTreeSet};
 use zellij_tile::prelude::*;
 
+/// How many lines the block under the list may take at most: three of the agent's last blocks,
+/// cut from the top when they are longer than this, so the list above it stays a list.
+const PEEK_MAX_LINES: usize = 10;
+
 /// How often the board rescans while it is visible, in seconds (`tick` in the configuration).
 ///
 /// **Two, not ten.** A board on the screen is being watched: an agent that starts, finishes or
@@ -286,6 +290,10 @@ struct State {
     peek_inflight: Option<String>,
     /// `a`: the digits answer the question under the list instead of jumping.
     answering: bool,
+    /// A digit was sent to a prompt and the screen has not been read since. If the question is
+    /// still there when it is, the prompt wanted the digit CONFIRMED and one Enter follows —
+    /// once, and only while the same question stands.
+    sent_answer: Option<(String, String)>,
     /// The board has been shown and has not been given its size since.
     unsized_yet: bool,
 }
@@ -1275,10 +1283,21 @@ impl State {
         let text = String::from_utf8_lossy(out);
         let lines: Vec<String> = text.lines().map(|line| line.trim_end().to_string()).collect();
         let question = model::question(&lines);
-        let tail = model::tail(&lines, 3);
+        let tail = model::tail_blocks(&lines, 3, PEEK_MAX_LINES);
         if self.answering && question.is_none() && self.current().is_some_and(|row| row.id == id) {
             eprintln!("lvim-zclaude: the question is gone from the screen — answering ends");
             self.answering = false;
+        }
+        // The digit went in and the same question is still on the screen: this prompt confirms.
+        if let Some((asked_id, asked)) = self.sent_answer.take() {
+            let still_there = question.as_ref().is_some_and(|now| now.text == asked);
+            if asked_id == id && still_there {
+                if let Some(target) = self.current().and_then(|row| target_of(row).ok()) {
+                    eprintln!("lvim-zclaude: the question stands — confirming with Enter");
+                    self.write_bytes(&target, vec![b'\r']);
+                    self.poke();
+                }
+            }
         }
         self.peek = Some(Peek { id, tail, question });
     }
@@ -1328,6 +1347,18 @@ impl State {
             BareKey::Char(c @ '1'..='9') if !ctrl => {
                 eprintln!("lvim-zclaude: answer {c} to {target}");
                 self.write_bytes(&target, vec![c as u8]);
+                // Some prompts act on the digit alone; others want it confirmed. Rather than
+                // guess — and rather than send an Enter that would post `1` as a message when
+                // the digit landed in the input — the screen is read again and the Enter follows
+                // only if the same question is still standing.
+                let asked = self
+                    .peek
+                    .as_ref()
+                    .and_then(|peek| peek.question.as_ref())
+                    .map(|question| question.text.clone());
+                if let (Some(id), Some(asked)) = (self.current().map(|row| row.id.clone()), asked) {
+                    self.sent_answer = Some((id, asked));
+                }
                 self.peek_now(true);
                 self.poke();
             }
