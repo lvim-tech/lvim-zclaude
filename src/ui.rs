@@ -398,13 +398,14 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
     // Two columns before ST: the cursor mark and the digit — the digit with a space after it,
     // so `1 ◐ rust` and not `1◐ rust`; a row without a digit has the same two spaces.
     let (w_st, w_branch, w_last, w_where, w_n) = (3, 10, 5, 16, 4);
+    // 2 for the number, 2 for the indent, 3 for the gaps the columns carry themselves.
     let fixed = w_st + w_branch + w_last + w_n + if narrow { 0 } else { w_where } + 7;
     let flexible = cols.saturating_sub(fixed);
     let w_project = if narrow { flexible } else { (flexible * 3) / 5 };
     let w_name = flexible.saturating_sub(w_project);
 
     let mut header = format!(
-        "   {}{}{}{}",
+        "  {}{}{}{}",
         pad("ST", w_st),
         pad("PROJECT", w_project),
         pad("BRANCH", w_branch),
@@ -423,15 +424,18 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
         .saturating_sub(4 + peek_height(view.peek.as_ref()))
         .max(1);
     let first = view.cursor.saturating_sub(body.saturating_sub(1)).min(view.rows.len());
-    // The first nine agents and transcripts are numbered: a digit jumps to them.
+    // **Only the agents are numbered**, and the number stands in front of the name it belongs
+    // to: `(1) rust`. A heading is a place, not a thing to reach for with a digit, and a stopped
+    // transcript is not an agent — numbering those made the digits a row count instead of a way
+    // to the agent you meant.
     let mut numbers: Vec<Option<usize>> = Vec::with_capacity(view.rows.len());
     let mut nth = 0;
     for row in view.rows {
-        numbers.push(if row.is_header() {
-            None
-        } else {
+        numbers.push(if matches!(row.kind, Kind::Agent) {
             nth += 1;
             (nth <= 9).then_some(nth)
+        } else {
+            None
         });
     }
     let mut drawn = 0usize;
@@ -449,20 +453,22 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
                     if *agents == 1 { "" } else { "s" }
                 )
             };
+            // One arrow, on the heading, saying open or shut — `⏷` and `⏵`, the drawn triangles
+            // rather than the thin `▾`/`▸` the board wore before. The cursor has no arrow of its
+            // own: the selected row is the one with a background, and two arrows on a line read
+            // as one thing pointing at another.
             // Cut the two texts, not the coloured line: an escape cut in half is garbage.
             let room = cols.saturating_sub(4);
             let name = truncate(&row.project, room);
             let what = truncate(&what, room.saturating_sub(name.chars().count() + 1));
-            let mark = if selected { "▸" } else { " " };
-            let fold = if *folded { "▸" } else { "▾" };
+            let fold = if *folded { "⏵" } else { "⏷" };
             let line = format!(
-                "{}{} {BOLD}{}{UNBOLD} {}",
-                fg(pal.map(|p| p.key), mark),
+                "{} {BOLD}{}{UNBOLD} {}",
                 fg(pal.map(|p| p.title), fold),
                 fg(pal.map(|p| p.title), &name),
                 fg(pal.map(|p| p.muted), &what)
             );
-            let width = 3 + name.chars().count() + 1 + what.chars().count();
+            let width = 2 + name.chars().count() + 1 + what.chars().count();
             let fill = " ".repeat(cols.saturating_sub(width));
             match (selected, pal) {
                 (true, Some(p)) => println!("{}{line}{fill}{RESET_BG}", ansi(p.selected, 48)),
@@ -471,10 +477,9 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
             }
             continue;
         }
-        let mark = if selected { "▸" } else { " " };
-        let mark_colour = if selected { pal.map(|p| p.key) } else { None };
-        // The digit that jumps here, in the column between the mark and the glyph.
-        let number = numbers[index].map(|n| format!("{n} ")).unwrap_or_else(|| "  ".to_string());
+        // The indent says this row belongs under the heading above it. The selected row is the
+        // one with a background; an arrow in front of it only made a second column of arrows.
+        let indent = "  ";
         let state = pal.map(|p| match (row.hook_state(), &row.running) {
             (Some(HookState::Waiting), _) => p.error,
             (Some(HookState::Done), _) => p.aging,
@@ -485,7 +490,10 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
         let project = if row.child {
             format!("  {}", crate::model::age(view.now, row.last))
         } else {
-            row.project.clone()
+            match numbers[index] {
+                Some(n) => format!("({n}) {}", row.project),
+                None => row.project.clone(),
+            }
         };
         let name = match &row.running {
             Some(running) => running.name.clone(),
@@ -516,9 +524,8 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
         };
         let age_colour = pal.map(|p| p.age_colour(since(view.now, row.last)));
         let mut line = format!(
-            "{}{}{}{}{}{}",
-            fg(mark_colour, mark),
-            fg(pal.map(|p| p.key), &number),
+            "{}{}{}{}{}",
+            indent,
             fg(state, &glyph),
             if row.child {
                 fg(project_colour, &pad(&project, w_project))
@@ -725,16 +732,24 @@ fn footer(view: &View, cols: usize) {
             ("Esc", " hide"),
         ]
     };
-    // Narrow pane: the keys that act, without the words.
-    if cols < 70 {
+    // **One line, whatever it costs.** A help line that wraps is two lines, and two lines push
+    // the whole board up by one — the column headings scroll off the top of the pane and the
+    // list looks headerless (2026-09-20). So: the words are dropped when they do not fit, and
+    // what is left is cut to the width by what is *seen*, escapes not counted.
+    let plain: usize = 6 + keys
+        .iter()
+        .map(|(key, what)| key.chars().count() + 5 + what.trim().chars().count())
+        .sum::<usize>();
+    let line = if plain + 2 <= cols {
+        help_line(pal, keys)
+    } else {
         let short: Vec<String> = keys
             .iter()
             .map(|(key, _)| fg(pal.map(|p| p.key), &format!("<{key}>")))
             .collect();
-        println!("  {}", short.join(" "));
-        return;
-    }
-    println!("  {}", help_line(pal, keys));
+        short.join(" ")
+    };
+    println!("  {}", cut_ansi(&line, cols.saturating_sub(2)));
 }
 
 #[cfg(test)]

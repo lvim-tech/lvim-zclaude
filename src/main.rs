@@ -96,17 +96,6 @@ impl Default for Geometry {
 }
 
 impl Geometry {
-    /// What zellij gives a floating pane when nobody says otherwise: half the screen, centred.
-    /// Measured on this machine — a 53x222 screen opens one at 26x111.
-    fn zellij_default() -> Geometry {
-        Geometry {
-            x: "25%".to_string(),
-            y: "25%".to_string(),
-            width: "50%".to_string(),
-            height: "50%".to_string(),
-        }
-    }
-
     fn from_config(configuration: &BTreeMap<String, String>) -> Geometry {
         let get = |key: &str, fallback: &str| {
             configuration
@@ -221,6 +210,12 @@ struct State {
     /// would set `visible`, and the next paint's `size_self` would put the pane straight back on
     /// the screen (seen 2026-09-20 in ROOT: hide, a manifest 5 ms later, the board reappearing).
     hiding: bool,
+    /// Somebody asked for the board — an `open` message, or the key behind it. Until then the
+    /// board has no business being on the screen, however zellij put it there.
+    asked_for: bool,
+    /// The tab's "BASE" swap layout has been checked once, at the first sight of the pane on the
+    /// screen — see `leave_base_layout`.
+    base_checked: bool,
     /// Written to the log once, at the first paint — the sign that the pane is alive.
     painted_once: bool,
     session_name: Option<String>,
@@ -647,7 +642,11 @@ impl ZellijPlugin for State {
                 if self.pending_open {
                     self.pending_open = false;
                     self.show();
-                } else if self.feeds_bars() {
+                }
+                // No sizing of a hidden pane here: `change_floating_panes_coordinates` on a
+                // suppressed pane takes it OUT and floats it (`tab/mod.rs` 7682-7692 in 0.45) —
+                // a flash of the board at every session start, for nothing.
+                if !self.pending_open && self.feeds_bars() {
                     // A preloaded, hidden board with a bar to feed: the first scan now.
                     self.scan();
                     self.arm_timer();
@@ -963,7 +962,22 @@ impl State {
             // Still "shown": a manifest from before the hide landed. Not a word, not a change.
             return false;
         }
+        if !hidden {
+            // The pane is on the screen — launched, restored with the session, or shown. Every
+            // manifest that says so until the tab's swap layout has been looked at once.
+            self.leave_base_layout();
+        }
         if hidden == !self.visible {
+            return false;
+        }
+        // **On the screen, unasked.** A launched instance starts shown, and a session restored
+        // by `zj` or `zellij attach` brings its floating panes back the same way — so the board
+        // greeted the person on every attach (2026-09-20). It goes away again: the only thing
+        // that puts this board in front of anybody is the key.
+        if !hidden && !self.asked_for {
+            eprintln!("lvim-zclaude: on the screen without being asked — hiding");
+            self.visible = true;
+            self.hide();
             return false;
         }
         eprintln!(
@@ -981,8 +995,56 @@ impl State {
         true
     }
 
+    /// **Where the board's size survived, and the way out.** zellij has no memory of the last
+    /// floating pane: a new one always gets half the screen (`find_room_for_new_pane`) — and is
+    /// then, with `auto_layout`, laid out by the tab's current *swap layout*. A tab created from
+    /// a layout gets that layout as swap layout "BASE" at position 0, constrained to exactly the
+    /// number of floating panes the layout had (`SwapLayouts::set_base_layout`, 0.45). A session
+    /// serialized while this board was open — only visible floating panes are written — comes
+    /// back with the board in its layout at 37x177: BASE then fits any single floating pane and
+    /// hands it those cells. The session manager, opened while the board is hidden, is that
+    /// single pane. Nothing the board does to its own size afterwards changes BASE.
+    ///
+    /// The only lever a plugin has is `next_swap_layout`: with the floating layer visible it
+    /// moves the tab's floating position from BASE to zellij's own "staggered" (no constraint,
+    /// no geometry — every pane through `find_room_for_new_pane`), where a fresh tab sits anyway.
+    /// Done once, at the first sight of the pane on the screen, and only when the tab reports
+    /// "BASE" as its active swap layout with the floating layer showing — that is the tab
+    /// carrying this board in its layout, and no other state reads that way.
+    fn leave_base_layout(&mut self) {
+        if self.base_checked || self.hiding {
+            return;
+        }
+        let Some(own) = self.own_tab else { return };
+        let Some(tab) = self.tabs.iter().find(|tab| tab.position == own) else { return };
+        // `next_swap_layout` acts on the client's active tab and on whichever layer is showing:
+        // until the tab list agrees with the manifest, nothing is decided.
+        if !tab.active || !tab.are_floating_panes_visible {
+            return;
+        }
+        self.base_checked = true;
+        let name = tab.active_swap_layout_name.as_deref().unwrap_or("");
+        eprintln!(
+            "lvim-zclaude: first sight on the screen — tab {own}, floating swap layout {name:?}{}",
+            if tab.is_swap_layout_dirty { " (dirty)" } else { "" }
+        );
+        if name != "BASE" {
+            return;
+        }
+        // A dirty layout is re-applied rather than left: the first call only clears the flag
+        // (our own sizing set it), the second moves the position. Both end on "staggered".
+        let calls = if tab.is_swap_layout_dirty { 2 } else { 1 };
+        eprintln!("lvim-zclaude: BASE carries this board — {calls} swap(s) to the next layout");
+        for _ in 0..calls {
+            next_swap_layout();
+        }
+        // The swap put the board at half the screen; the next paint gives it its size back.
+        self.unsized_yet = true;
+    }
+
     /// `open`: show the board, or remember to once the permissions are in.
     fn open(&mut self) {
+        self.asked_for = true;
         if !self.permitted {
             self.pending_open = true;
             return;
@@ -1030,11 +1092,11 @@ impl State {
     /// Answering stops with it: no digit may go anywhere from a board nobody sees.
     fn hide(&mut self) {
         eprintln!("lvim-zclaude: hide");
-        // **Give the size back before going away.** zellij hands a new floating pane the geometry
-        // of the last one, so a board that leaves at 80%x70% makes the next thing opened — the
-        // session manager, say — come up that big. Shrinking to zellij's own default on the way
-        // out leaves nothing of ours behind; `show` sizes the board again anyway.
-        size_self(&Geometry::zellij_default());
+        self.asked_for = false;
+        // Nothing to give back: a hidden pane is neither serialized with the session nor a
+        // source of geometry for the next floating pane (`unsuppress_pane` goes through
+        // `find_room_for_new_pane`, half the screen). See `leave_base_layout` for where the
+        // board's size really survived.
         self.visible = false;
         self.hiding = true;
         self.answering = false;
@@ -1743,8 +1805,15 @@ impl State {
                     self.answering = true;
                     return self.answer_key(&key, ctrl);
                 }
+                // The board numbers the agents it shows — `(1) rust` — so the digit is the Nth
+                // agent, not the Nth line: a heading and a stopped transcript carry no number.
                 let nth = c as usize - '1' as usize;
-                let at = self.shown.iter().enumerate().filter(|(_, row)| !row.is_header()).nth(nth);
+                let at = self
+                    .shown
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| matches!(row.kind, model::Kind::Agent))
+                    .nth(nth);
                 if let Some((at, _)) = at {
                     self.cursor = at;
                     self.jump();
