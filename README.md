@@ -160,6 +160,16 @@ and publishes it **only when it changes**:
 agents=3 busy=1 waiting=1 done=0 idle=1
 ```
 
+After the two lines comes one line per zellij session that has agents, for a session list
+(lvim-zsession's panel) — every agent counts here, the focused one too:
+
+```
+session<TAB>RUST<TAB>2<TAB>1<TAB>0<TAB>1        name, agents, busy, waiting, done
+```
+
+A reader that has just opened sends the pipe `lvim-zclaude-summary-request` (from a plugin:
+`pipe_message_to_plugin`) and gets the summary at once instead of on the next change.
+
 - **file** — `summary_file "/run/user/1000/lvim-zclaude"`: `head -1` is the prose, line 2 the
   pairs. A zjstatus `command` widget, an lvim-zbar script, anything that reads a file.
 - **pipe** — `summary_pipe "on"`: the same text is broadcast to every plugin of the session as

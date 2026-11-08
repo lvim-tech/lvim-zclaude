@@ -461,6 +461,30 @@ pub fn summary(running: &[Running]) -> (String, String) {
     (prose, pairs)
 }
 
+/// The agents per zellij session, one line each — `session<TAB>name<TAB>agents<TAB>busy<TAB>
+/// waiting<TAB>done` — for a session list (lvim-zsession's panel) that shows how many agents a
+/// session holds. Every agent counts here, the one in front of you too: this is an inventory, not
+/// news. Agents outside zellij have no session and are left out. Sorted by name.
+pub fn per_session(running: &[Running]) -> String {
+    let mut by: BTreeMap<&str, [usize; 4]> = BTreeMap::new();
+    for live in running {
+        let Some(session) = live.zellij_session.as_deref() else { continue };
+        let entry = by.entry(session).or_default();
+        entry[0] += 1;
+        match live.hook.as_ref().map(|h| h.state) {
+            Some(HookState::Waiting) => entry[2] += 1,
+            Some(HookState::Done) => entry[3] += 1,
+            None if live.busy => entry[1] += 1,
+            None => {}
+        }
+    }
+    by.iter()
+        .map(|(name, [agents, busy, waiting, done])| {
+            format!("session\t{name}\t{agents}\t{busy}\t{waiting}\t{done}\n")
+        })
+        .collect()
+}
+
 /// A question an agent has put on its screen with numbered options — Claude Code's permission
 /// prompt (`Do you want to proceed?` / `1. Yes` / `2. Yes, and don't ask again…` / `3. No…`),
 /// its plan approval, its `AskUserQuestion`. The board turns it into buttons.
@@ -743,6 +767,26 @@ mod tests {
         assert_eq!(age(1_000_000, 100_000), "10d");
         assert_eq!(age(100, 0), "—", "a session file with no time is not 56 years old");
         assert_eq!(age(100, 200), "—", "and neither is one from the future");
+    }
+
+    #[test]
+    fn the_agents_are_counted_per_zellij_session_and_those_outside_are_left_out() {
+        let a = running("a", "/x", true, 1);
+        let mut b = running("b", "/x", false, 1);
+        b.hook = Some(crate::scan::Hook {
+            state: HookState::Waiting,
+            kind: "permission_prompt".to_string(),
+            at: 1,
+            message: String::new(),
+        });
+        let mut c = running("c", "/y", false, 1);
+        c.zellij_session = Some("LUA".to_string());
+        let mut d = running("d", "/z", true, 1);
+        d.zellij_session = None;
+        assert_eq!(
+            per_session(&[a, b, c, d]),
+            "session\tLUA\t1\t0\t0\t0\nsession\tRUST\t2\t1\t1\t0\n"
+        );
     }
 
     /// **The first level is the zellij session, this one on top**; under it, one row per pane,

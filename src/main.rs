@@ -893,6 +893,13 @@ impl ZellijPlugin for State {
             }
             // From `hooks/lvim-zclaude-hook.sh`: a session is waiting, done, or working again.
             "lvim-zclaude-event" => self.hook_event(message.payload.as_deref().unwrap_or("")),
+            // A reader that just opened (lvim-zsession's panel) asks for the summary now rather
+            // than waiting for it to change.
+            "lvim-zclaude-summary-request" => {
+                self.summary_last.clear();
+                self.write_summary();
+                false
+            }
             _ => false,
         }
     }
@@ -1541,7 +1548,9 @@ impl State {
             .cloned()
             .collect();
         let (prose, pairs) = model::summary(&counted);
-        let text = format!("{prose}\n{pairs}\n");
+        // Lines 3+ are the agents per zellij session (all of them, the watched one too), for a
+        // session list. A bar reads only the first two lines.
+        let text = format!("{prose}\n{pairs}\n{}", model::per_session(&self.running));
         if text == self.summary_last {
             return;
         }
