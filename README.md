@@ -81,7 +81,7 @@ in `~/.cache/zellij/permissions.kdl` (lvim-zpm writes them there at session star
 |---|---|
 | `↑` `↓`, `j` `k` | move (`j`/`k` type into the filter once it is not empty) |
 | `Enter` | on an agent: jump to its pane; on a session heading: switch to that session; on a stopped transcript: offer to resume it (see `N`) |
-| `v` | the agent's screen **as its terminal**: its pane's own colours (`dump-screen --ansi`), re-read every `preview_tick` (0.3 s), and every key typed into that pane — `Enter`, `Esc`, arrows, digits, `Ctrl c`, `Shift Tab`, letters in any alphabet. Answer a prompt there as you would in the pane. `Esc` brings the list back (so do `Ctrl ]` and the board's own key, `Ctrl s, a`). `Esc` is the one key the pane never sees: reaching for it to close a view is reflex, and in `claude` it cancels the turn. To send an escape to the agent, press `Ctrl [` — that IS the escape byte, and it goes through |
+| `v` | the agent's pane itself, in the board — a zellij **live view**: zellij draws the pane there as it changes and hands it every key directly (no plugin in between, no polling — typing is as fast as in the pane), in this session or another one. Every key is the agent's, `Esc` included. `Alt Enter` (always) or `live_view_release_key` from `config.kdl` gives the keyboard back and brings the list back; this config sets it to `Ctrl q` (a `Ctrl`+letter: zellij reads a legacy terminal's `Ctrl ]` as a bare character). After a click outside the view, `Enter` types into it again and `Esc` leaves |
 | `a` | answer the question under the list (see below): the digits `1`–`9` go to the agent's pane, one keystroke each; `Enter` confirms when the prompt wants it; `Esc` stops answering. Only while answering — otherwise a digit jumps |
 | `Tab` | on a heading: fold or unfold it (`←` folds, `→` unfolds; a filter looks through folded headings); on a stopped project: its older transcripts, newest first |
 | `i` | type a line — in any alphabet — and send it to the agent's pane, as if typed there; a paste while typing joins the line |
@@ -98,7 +98,7 @@ in `~/.cache/zellij/permissions.kdl` (lvim-zpm writes them there at session star
 | `g` `G`, `PageUp` `PageDown` | first, last, page |
 | `Esc` | clear the filter, or hide the board |
 | `Ctrl c` | hide the board |
-| `Ctrl o` | lvim-zsession's session panel in the board's place (its `Ctrl o` comes back, filtered to that session's agents) |
+| `Ctrl o` | lvim-zsession's session panel in the board's place (its `Ctrl o` comes back, the cursor on that session's agents) |
 
 ## Under the list: the last thing the agent said, and the buttons
 
@@ -206,7 +206,7 @@ to a pane), `ChangeApplicationState` (focusing that pane, closing it, naming and
 own pane), `RunCommands` (one `sh -c` per scan, the `kill` behind `S`, the pane `N` opens — a plugin
 is WASI in a sandbox and cannot read `~/.claude` itself), `WriteToStdin` (`i` — the line goes into
 the agent's pane, in this zellij session or another one), `ReadPaneContents` (the screen under
-the list and `v`, from `get_session_preview`). Needs zellij built from `main` at or after
+the list, from `get_session_preview`, and `v`'s live view — which also needs `WriteToStdin`). Needs zellij built from `main` at or after
 `644d78c` (2026-11-10).
 
 **A pane that stays on zellij's "Loading" text, or shows a permission prompt after an upgrade,
@@ -233,7 +233,7 @@ answered leaves that instance "loading" until it is closed
 | `summary_file` | — | a file the summary is written to, for a bar (see "For bars") |
 | `summary_pipe` | `off` | `on`: the summary is also broadcast as the `lvim-zclaude-summary` pipe |
 | `background_tick` | `30` | seconds between scans while hidden — only when a bar is fed |
-| `preview_tick` | `0.3` | seconds between screen reads while the terminal view (`v`) is open or a question is being answered (`a`) |
+| `preview_tick` | `0.3` | seconds between screen reads while the board is open or a question is being answered (`a`) |
 
 The configuration goes where the plugin is loaded — in `load_plugins`, or in the braces of a
 `LaunchOrFocusPlugin` (everything there that is not one of zellij's own `floating`,
@@ -288,16 +288,13 @@ is a canary: when it fails, `zellij-tile` has been fixed and `host.rs`/`keys.rs`
   session heading there is no tab: the pane goes to the session's focused tab. A session with no
   agent is not on the board, but its name can be typed at the session question. The new agent
   appears on the board at the next scan, once it has written `~/.claude/sessions/<pid>.json`.
-- **The terminal view is the pane's screen and keyboard, not the pane.** A plugin's pane shows
-  what the plugin prints; a terminal pane's grid lives in the server that owns it, and no plugin
-  call hands a plugin another pane's output or draws one pane inside another
-  (`replace_pane_with_existing_pane` swaps places, `break_panes_to_tab_with_index` moves within
-  one session). Another zellij session is another server process: since zellij `644d78c` a
-  plugin reads its pane with `get_session_preview` and types into it with
-  `write_to_session_pane` (before, only the CLI's `dump-screen` and `write` could). So `v` reads the pane
-  every `preview_tick` with its colours and writes every key into it as the bytes a terminal
-  sends; the cursor and mouse are not carried, and a key zellij binds for itself never reaches
-  the board. For the real pane under your hands there is `Enter`.
+- **The terminal view is the pane itself.** Since zellij `644d78c` a plugin can ask for a
+  *live view* (`set_live_view`): zellij mirrors a pane — in this session or another one on the
+  machine — into a rectangle of the plugin's pane, and with `set_live_view_input` it sends the
+  keyboard straight to it. `v` puts the view under its heading and asks for the keyboard; zellij
+  says who holds it in `LiveViewStateChanged`, and the release key closes the view. While you
+  type into it, zellij gives the agent's pane the view's size (its `mirror_resizes_source_pane`,
+  default on).
 - `v` and the block under the list are the two places the board shows the conversation: the
   pane's screen, on the screen only, nothing kept.
 - **Nothing is answered for you.** zj-agent-mob (whose `waiting`, follow-ups, digits, orders

@@ -198,12 +198,23 @@ pub struct View<'a> {
     pub peek: Option<PeekView<'a>>,
 }
 
-/// The agent's screen as the preview shows it: **the pane's own colours** (`dump-screen --ansi`),
-/// every key going to the pane. `scroll` is lines up from the bottom.
+/// The terminal view (`v`): a heading over the rectangle zellij draws the agent's pane into
+/// (a live view), and a footer saying who has the keyboard.
 pub struct PreviewView<'a> {
     pub title: &'a str,
-    pub lines: &'a [String],
-    pub scroll: usize,
+    /// The keyboard is the agent's.
+    pub captured: bool,
+    /// The mirror is not live yet.
+    pub connecting: bool,
+    /// The configured `live_view_release_key`, empty when there is none (Alt Enter always works).
+    pub release_key: &'a str,
+}
+
+/// The rows zellij draws the agent's pane into: everything between the heading (row 0) and the
+/// footer. Every line printed ends with a newline, so the plugin prints one line fewer than it has
+/// rows — printing all of them would scroll the heading off the top.
+pub fn preview_body_rows(rows: usize) -> usize {
+    rows.saturating_sub(3).max(1)
 }
 
 /// What sits under the list for the agent under the cursor.
@@ -637,18 +648,18 @@ fn draw_preview(view: &View, preview: &PreviewView, rows_available: usize, cols:
         fg(pal.map(|p| p.title), "terminal"),
         fg(pal.map(|p| p.muted), &truncate(preview.title, cols.saturating_sub(10)))
     );
-    let body = rows_available.saturating_sub(3).max(1);
-    let total = preview.lines.len();
-    let end = total.saturating_sub(preview.scroll.min(total.saturating_sub(body)));
-    let start = end.saturating_sub(body);
-    for line in &preview.lines[start..end] {
-        println!("{}", cut_ansi(line, cols));
-    }
-    for _ in (end - start)..body {
-        println!();
-    }
-    if preview.lines.is_empty() {
-        println!("{}", fg(pal.map(|p| p.muted), "  reading the pane…"));
+    // The rectangle zellij draws the pane into (rows 1 .. rows-1): left blank here. The heading
+    // and the footer are the only lines this plugin prints.
+    let body = preview_body_rows(rows_available);
+    if preview.connecting {
+        println!("{}", fg(pal.map(|p| p.muted), "  connecting to the pane…"));
+        for _ in 1..body {
+            println!();
+        }
+    } else {
+        for _ in 0..body {
+            println!();
+        }
     }
     footer(view, cols);
 }
@@ -695,16 +706,31 @@ fn footer(view: &View, cols: usize) {
         println!("{}", fg(pal.map(|p| p.error), &truncate(&format!("  {error}"), cols)));
         return;
     }
-    if view.preview.is_some() {
-        // Two keys are the board's — the one that leaves and the one that sends an escape in its
-        // place; everything else — Enter, arrows, digits, Ctrl c — is typed into the agent's pane.
-        println!(
-            "  {}{}{}{}",
-            fg(pal.map(|p| p.muted), "every key goes to the agent · "),
-            keycap(pal, "Esc", " back to the list"),
-            keycap(pal, "Ctrl [", " sends Esc to the agent"),
-            fg(pal.map(|p| p.muted), " (Ctrl ] also leaves)")
-        );
+    if let Some(preview) = view.preview.as_ref() {
+        // While captured zellij hands every key to the pane, Esc included; only its release
+        // gesture comes back, and that closes the view.
+        if preview.captured {
+            let release = match preview.release_key.trim() {
+                "" => keycap(pal, "Alt Enter", " back to the list"),
+                key => format!(
+                    "{}{}{}",
+                    fg(pal.map(|p| p.key), &format!("<{key}>")),
+                    fg(pal.map(|p| p.muted), " or "),
+                    keycap(pal, "Alt Enter", " back to the list")
+                ),
+            };
+            println!(
+                "  {}{}",
+                fg(pal.map(|p| p.muted), "every key goes to the agent, Esc too · "),
+                release
+            );
+        } else {
+            println!(
+                "  {}  {}",
+                keycap(pal, "Enter", " type into the agent"),
+                keycap(pal, "Esc", " back to the list")
+            );
+        }
         return;
     }
     for line in help_lines(pal, help_keys(view), cols) {

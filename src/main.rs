@@ -373,16 +373,24 @@ fn target_of(row: &Row) -> Result<Target, &'static str> {
     }
 }
 
-/// An agent's screen, shown over the list (`v`) — **as its terminal**: the pane's own colours,
-/// re-read every `preview_tick`, and every key written into the pane as the bytes a terminal
-/// would send. Not the pane itself: see `preview` for why that cannot be.
+/// An agent's pane, shown over the list (`v`) as a zellij **live view**: zellij draws the pane
+/// into the board's rectangle itself and, while the input is captured, sends every key straight
+/// to it. See `preview`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preview {
     pub target: Target,
     /// `project · SESSION · tab · title`, for the heading.
     pub title: String,
-    /// The pane's viewport, top to bottom, with its ANSI styling.
-    pub lines: Vec<String>,
+    /// The view last handed to `set_live_view` — sent again only when the rectangle changes.
+    pub sent: Option<LiveView>,
+    /// The keyboard is the agent's (zellij says so in `LiveViewStateChanged`).
+    pub captured: bool,
+    /// Ask for the keyboard once the view exists (right after the first `set_live_view`).
+    pub capture_wanted: bool,
+    /// Where the mirror is: connecting, live, or closed and why.
+    pub state: MirrorState,
+    /// `live_view_release_key` from the config, as zellij reports it (empty when unset).
+    pub release_key: String,
 }
 
 /// The two acts that do not undo: killing the process, closing the pane it lives in. Both wait for
@@ -643,6 +651,7 @@ impl ZellijPlugin for State {
             EventType::PastedText, // a paste while composing lands in the line, whole
             EventType::Visible,
             EventType::SessionPreview, // an agent's screen, asked with `get_session_preview`
+            EventType::LiveViewStateChanged, // `v`: the live view of the agent's pane
         ]);
     }
 
@@ -740,6 +749,9 @@ impl ZellijPlugin for State {
                 asked || titles || shown
             }
             Event::SessionPreview(preview) => self.screen_arrived(preview),
+            Event::LiveViewStateChanged { state, input_captured, input_released_by, release_key, .. } => {
+                self.live_view_changed(state, input_captured, input_released_by, release_key)
+            }
             Event::RunCommandResult(code, out, err, context) => {
                 if context.get("step").map(String::as_str) == Some("panes") {
                     self.jump_there(&String::from_utf8_lossy(&out), &context);
@@ -829,9 +841,8 @@ impl ZellijPlugin for State {
                     // The scan behind it (the list itself: who is running, where, since when)
                     // keeps its own slower pace, because that is a `sh -c` and this is not.
                     self.since_scan += elapsed;
-                    if self.showing.is_some() {
-                        self.refresh_preview();
-                    } else {
+                    // The terminal view needs nothing: zellij draws it.
+                    if self.showing.is_none() {
                         self.peek_now(true);
                     }
                     if self.since_scan >= self.tick {
@@ -885,7 +896,7 @@ impl ZellijPlugin for State {
                 // and reaches the board whatever the terminal makes of a control character.
                 if self.visible && self.showing.is_some() {
                     eprintln!("lvim-zclaude: open while the terminal view is up — back to the list");
-                    self.showing = None;
+                    self.close_view();
                     return true;
                 }
                 self.open();
@@ -903,8 +914,8 @@ impl ZellijPlugin for State {
                 }
                 true
             }
-            // lvim-zsession's panel (`Ctrl o`): the agents of one zellij session. The filter is
-            // the session's own `NAME · ` from the TAB column, so Esc gives the whole board back.
+            // lvim-zsession's panel (`Ctrl o`): the whole board, the cursor on the heading of the
+            // zellij session chosen there (the top when that session runs no agent).
             "lvim-zclaude-open" => {
                 let session = message
                     .payload
@@ -913,10 +924,14 @@ impl ZellijPlugin for State {
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                self.filter = if session.is_empty() { String::new() } else { format!("{session} · ") };
-                self.cursor = 0;
+                self.filter.clear();
                 self.rebuild();
-                self.showing = None;
+                self.cursor = self
+                    .shown
+                    .iter()
+                    .position(|row| row.is_session() && row.project == session)
+                    .unwrap_or(0);
+                self.close_view();
                 self.open();
                 true
             }
@@ -947,6 +962,9 @@ impl ZellijPlugin for State {
             self.unsized_yet = false;
             size_self(&self.geometry);
         }
+        if self.showing.is_some() && self.visible {
+            self.place_live_view(rows, cols);
+        }
         let view = ui::View {
             rows: &self.shown,
             cursor: self.cursor,
@@ -970,8 +988,9 @@ impl ZellijPlugin for State {
             order: self.order,
             preview: self.showing.as_ref().map(|p| ui::PreviewView {
                 title: &p.title,
-                lines: &p.lines,
-                scroll: 0,
+                captured: p.captured,
+                connecting: p.state != MirrorState::Live,
+                release_key: &p.release_key,
             }),
             peek: self
                 .peek
@@ -1147,6 +1166,8 @@ impl State {
         self.visible = false;
         self.hiding = true;
         self.answering = false;
+        // A live view would hold the keyboard for a pane nobody sees.
+        self.close_view();
         hide_board();
     }
 
@@ -1405,25 +1426,10 @@ impl State {
                 self.peek_place = None;
                 self.peek_inflight = None;
             }
-            let shown = self.showing.as_ref().and_then(|p| self.place_of(&p.target));
-            if let (Some((session, _)), Some(error)) = (shown, preview.error.as_ref()) {
-                if session == preview.session_name {
-                    self.preview_arrived(Err(error));
-                    return true;
-                }
-            }
             return false;
         };
         let place = (preview.session_name.clone(), pane);
         let mut changed = false;
-        let shown = self.showing.as_ref().and_then(|p| self.place_of(&p.target));
-        if shown.as_ref() == Some(&place) {
-            match &preview.error {
-                Some(error) => self.preview_arrived(Err(error)),
-                None => self.preview_arrived(Ok(&preview.contents)),
-            }
-            changed = true;
-        }
         if self.peek_place.as_ref() == Some(&place) {
             self.peek_place = None;
             let id = self.peek_inflight.clone().unwrap_or_default();
@@ -2285,25 +2291,16 @@ impl State {
         }
     }
 
-    /// `v` — the agent's own screen, **as its terminal**: read with `zellij --session S action
-    /// dump-screen --pane-id terminal_N --ansi` (any session, no client needed there) every
-    /// `preview_tick`, and every key written into that pane as the bytes a terminal sends —
-    /// `Enter`, `Esc`, the arrows, `1`, `Ctrl c`, all of it. It looks like the pane and answers
-    /// like the pane; `Ctrl ]` is the one key that stays here and brings the list back.
-    ///
-    /// **Why not the pane itself.** A plugin's pane shows what `render` prints and nothing else:
-    /// a terminal pane's grid lives in the `Tab` of the server that owns it, and no plugin call
-    /// (`zellij-tile` 0.44.3, `shim.rs`, every `pub fn` read) hands a plugin another pane's
-    /// output or draws a pane inside a plugin. `replace_pane_with_existing_pane` swaps places —
-    /// the board would be gone — and `break_panes_to_tab_with_index` moves a pane between tabs
-    /// of the **same** session only. Another zellij session is another server process: the CLI's
-    /// `dump-screen` is the only way to see its pane, `write` the only way to type into it. To
-    /// have the real pane under the hands there is `Enter` (`focus_pane_with_id` here,
-    /// `switch_session_with_focus` there); this view is for answering without leaving.
+    /// `v` — the agent's pane itself, as a zellij **live view** (`set_live_view`): zellij draws
+    /// the pane into the board's rectangle as it changes and, once the input is captured
+    /// (`set_live_view_input`), hands every key to it directly — no plugin in between, no
+    /// polling, so typing is as fast as in the pane itself. Works for a pane in any session on
+    /// this machine. `Alt Enter` (zellij's own, always) or `live_view_release_key` from the
+    /// config gives the keyboard back, and the list comes back with it; `Esc` is the agent's.
     ///
     /// **This and the block under the list are the two places the board shows the conversation
     /// itself** — rule 7 of `CLAUDE.md` keeps the transcripts private. Only the screen, only
-    /// while shown, nothing kept beyond the current frame.
+    /// while shown, nothing kept.
     fn preview(&mut self) -> bool {
         let Some(row) = self.current() else { return false };
         let target = match target_of(row) {
@@ -2313,17 +2310,11 @@ impl State {
                 return true;
             }
         };
-        // A local target cannot be read before zellij has said what this session is called.
-        let _session = match &target {
-            Target::Remote { session, .. } => session.clone(),
-            Target::Local(_) => match self.session_name.clone() {
-                Some(session) => session,
-                None => {
-                    self.last_error = Some("this session's name is not known yet".into());
-                    return true;
-                }
-            },
-        };
+        // A local target cannot be addressed before zellij has said what this session is called.
+        if matches!(target, Target::Local(_)) && self.session_name.is_none() {
+            self.last_error = Some("this session's name is not known yet".into());
+            return true;
+        }
         // **The row's own name leads, and the session is named once.** `where_text` already carries
         // the session, so putting it in front of that read as `ROOT · ROOT · Tab #1`. The pane's
         // title is last and only when it says something: a pane running `claude` under a shell is
@@ -2342,66 +2333,98 @@ impl State {
         }
         eprintln!("lvim-zclaude: terminal view of {target}");
         self.answering = false;
-        self.showing = Some(Preview { target, title, lines: Vec::new() });
-        self.refresh_preview();
-        self.poke();
+        self.showing = Some(Preview {
+            target,
+            title,
+            sent: None,
+            captured: false,
+            capture_wanted: true,
+            state: MirrorState::Connecting,
+            release_key: String::new(),
+        });
         true
     }
 
-    fn refresh_preview(&mut self) {
-        let Some(preview) = self.showing.as_ref() else { return };
-        let (session, pane) = match &preview.target {
-            Target::Remote { session, pane } => (session.clone(), *pane),
-            Target::Local(pane) => (self.session_name.clone().unwrap_or_default(), *pane),
+    /// From `render`: the live view at the rectangle under the heading, sent only when it is new
+    /// or has moved; then the keyboard, once.
+    fn place_live_view(&mut self, rows: usize, cols: usize) {
+        let Some((session, pane)) = self.showing.as_ref().and_then(|p| self.place_of(&p.target)) else {
+            return;
         };
-        get_session_preview(&session, None, Some((pane, false)));
-    }
-
-    /// The agent's screen came back, styled. The pane's viewport is what `dump-screen` gives
-    /// without `--full`; trailing blank lines (blank once the escapes are taken out) are dropped
-    /// so the last thing said sits at the bottom.
-    fn preview_arrived(&mut self, screen: Result<&str, &String>) {
         let Some(preview) = self.showing.as_mut() else { return };
-        let text = match screen {
-            Ok(text) => text,
-            Err(reason) => {
-                preview.lines = vec![format!("could not read the pane: {}", reason.trim())];
-                return;
-            }
-        };
-        let mut lines: Vec<String> = text.lines().map(|line| line.trim_end().to_string()).collect();
-        while lines.last().is_some_and(|line| ui::strip_ansi(line).trim().is_empty()) {
-            lines.pop();
+        let view = LiveView::new(
+            PaneAddress::local(session, PaneId::Terminal(pane)),
+            0,
+            1,
+            cols,
+            ui::preview_body_rows(rows),
+        );
+        if preview.sent.as_ref() != Some(&view) {
+            set_live_view(Some(view.clone()));
+            preview.sent = Some(view);
         }
-        preview.lines = lines;
+        if preview.capture_wanted {
+            preview.capture_wanted = false;
+            set_live_view_input(true);
+        }
     }
 
-    /// Every key while the terminal view is open: `Ctrl ]` closes it, anything else goes to the
-    /// pane as bytes and the screen is read again at once. A key with no bytes (`CapsLock`) is
-    /// swallowed. Modified keys are logged — the one way to see on a live session which of them
-    /// zellij lets through to a plugin.
-    fn preview_key(&mut self, key: &KeyWithModifier, ctrl: bool) -> bool {
-        let Some(preview) = self.showing.as_ref() else { return false };
-        // **`Esc` leaves the terminal, it does not reach the agent.** Sending it there is what a
-        // person does by reflex to close a view, and in `claude` that keystroke cancels whatever
-        // it was doing — an expensive way to learn the key. The agent can still be sent an escape:
-        // `Ctrl [` IS the escape byte (`[` is 0x5b, and Ctrl clears the top bits: 0x1b), so it
-        // falls through to `bytes_of` below and arrives as `Esc` in the pane.
-        if key.bare_key == BareKey::Esc && key.key_modifiers.is_empty()
-            || ctrl && key.bare_key == BareKey::Char(']')
-        {
+    /// Close the terminal view: the live view goes, the list comes back.
+    fn close_view(&mut self) {
+        if let Some(preview) = self.showing.take() {
+            if preview.sent.is_some() {
+                set_live_view(None);
+            }
             eprintln!("lvim-zclaude: terminal view closed");
-            self.showing = None;
+        }
+    }
+
+    /// zellij on the live view: the mirror's state and who holds the keyboard. The keyboard given
+    /// back with the release key closes the view — one key back to the list, as `Ctrl ]` was.
+    /// A mirror that closed (the pane or its session is gone) closes it with the reason.
+    fn live_view_changed(
+        &mut self,
+        state: MirrorState,
+        captured: bool,
+        released_by: Option<LiveViewRelease>,
+        release_key: String,
+    ) -> bool {
+        let Some(preview) = self.showing.as_mut() else { return false };
+        preview.release_key = release_key;
+        if preview.sent.is_none() {
+            // A report about a view of before (a `None` already sent); not this one's.
+            return false;
+        }
+        eprintln!("lvim-zclaude: live view {state:?} captured={captured} released_by={released_by:?}");
+        if let MirrorState::Closed(reason) = state {
+            self.last_error = Some(format!("the agent's pane could not be shown: {reason:?}"));
+            self.close_view();
             return true;
         }
-        if !key.key_modifiers.is_empty() {
-            eprintln!("lvim-zclaude: terminal key {key}");
+        preview.state = state;
+        let was = preview.captured;
+        preview.captured = captured;
+        if was && !captured && released_by == Some(LiveViewRelease::Key) {
+            self.close_view();
         }
-        let Some(bytes) = keys::bytes_of(key) else { return true };
-        let target = preview.target.clone();
-        self.write_bytes(&target, bytes);
-        self.refresh_preview();
-        self.poke();
+        true
+    }
+
+    /// A key that reached the board while the terminal view is open: the keyboard is not the
+    /// agent's (a click outside, the focus gone and back). `Esc`, `Ctrl q` and `Ctrl ]` close the
+    /// view; `Enter`, `i` or `v` give the keyboard back to the agent.
+    fn preview_key(&mut self, key: &KeyWithModifier, ctrl: bool) -> bool {
+        if key.bare_key == BareKey::Esc && key.key_modifiers.is_empty()
+            || ctrl && matches!(key.bare_key, BareKey::Char(']') | BareKey::Char('q'))
+        {
+            self.close_view();
+            return true;
+        }
+        if key.key_modifiers.is_empty()
+            && matches!(key.bare_key, BareKey::Enter | BareKey::Char('i') | BareKey::Char('v'))
+        {
+            set_live_view_input(true);
+        }
         true
     }
 
