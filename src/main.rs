@@ -1621,6 +1621,11 @@ impl State {
             .cloned()
             .collect();
         let (prose, pairs) = model::summary(&counted);
+        // The same count with the watched agent in: whether an agent works is not an alert, and a
+        // bar that says `1 idle` while the agent in front of you is busy reads as wrong. A bar
+        // takes `working` and `idle` from these, and what waits for you from the fields before.
+        let all_busy = self.running.iter().filter(|live| live.busy && live.hook.is_none()).count();
+        let pairs = format!("{pairs} all={} all_busy={all_busy}", self.running.len());
         // Lines 3+ are the agents per zellij session (all of them, the watched one too), for a
         // session list. A bar reads only the first two lines.
         let text = format!("{prose}\n{pairs}\n{}", model::per_session(&self.running));
