@@ -3,7 +3,7 @@
 //   Ctrl s, then a  — open the board as a floating pane (or focus it, if it is already open)
 // `{{wasm}}` becomes the absolute `file:` URL of the built wasm below.
 //
-// The four permissions, and why each is needed:
+// The permissions, and why each is needed:
 //   ReadApplicationState   — the pane manifest, the tabs, and `get_pane_pid`, which is how a
 //                            running `claude` is matched to the pane it lives in.
 //   ChangeApplicationState — focusing that pane, closing it (`X`), naming, sizing, hiding and
@@ -14,6 +14,8 @@
 //                            exactly as if it had been typed there (in any zellij session).
 //   ReadPaneContents       — the peek under the list and `v`: an agent's screen, from zellij's
 //                            `get_session_preview`, in this session or another one.
+//   MessageAndLaunchOtherPlugins — `Ctrl o`: asks lvim-zsession's background instance for the
+//                            session panel, which it launches already at its size.
 //
 // The key sends the board a MESSAGE (`MessagePlugin … name "open"`) rather than launching it
 // (`LaunchOrFocusPlugin`), and `Esc` hides the board rather than closing it. A launched or
@@ -39,7 +41,7 @@
 // launched that way, which is the way that flashes.
 plugin {
     wasm "lvim-zclaude.wasm"
-    permissions "ReadApplicationState" "ChangeApplicationState" "RunCommands" "WriteToStdin" "ReadPaneContents"
+    permissions "ReadApplicationState" "ChangeApplicationState" "RunCommands" "WriteToStdin" "ReadPaneContents" "MessageAndLaunchOtherPlugins"
     keybinds {
         tmux {
             // `summary_pipe "on"`: the fleet line is broadcast to the session's other plugins as

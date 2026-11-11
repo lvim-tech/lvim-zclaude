@@ -61,13 +61,6 @@ const PEEK_MAX_LINES: usize = 10;
 /// the board is open. Hidden, it does not scan at all unless it feeds a bar (`background_tick`).
 const DEFAULT_TICK: f64 = 2.0;
 
-/// Where lvim-zpm keeps lvim-zsession — the URL `Ctrl s s` launches its panel from.
-const DEFAULT_SESSIONS_URL: &str = "file:$HOME/.config/zellij/zpm/plugins/lvim-zsession/lvim-zsession.wasm";
-
-/// `sh -c` with `$1` the zellij session and `$2` the panel's URL: launch lvim-zsession's panel
-/// floating in the focused tab, with the configuration the keybind gives it. `eval` expands the
-/// `$HOME` a configured URL carries.
-const OPEN_SESSIONS: &str = r#"eval "url=\"$2\"" && exec zellij --session "$1" action launch-or-focus-plugin --floating --move-to-focused-tab --configuration panel=on "$url""#;
 /// How often the agent's screen is re-read while the terminal view (`v`) is open or a question
 /// is being answered (`a`), in seconds — `preview_tick` in the configuration. One `dump-screen`
 /// per beat, ~10 ms; fast enough for a prompt to react as it would under the person's hands.
@@ -178,9 +171,6 @@ fn size_self(geometry: &Geometry) {
 struct State {
     // --- configuration ---
     claude_dir: String,
-    /// lvim-zsession's wasm (`sessions_url`): `Ctrl o` launches its panel. `$HOME` is expanded by
-    /// the shell, so the default is the same URL `config.kdl` binds to `Ctrl s s`.
-    sessions_url: String,
     /// The keyboard layouts whose letters are read as the Latin keys (`layouts`, `layout.rs`).
     layouts: layout::Layouts,
     tick: f64,
@@ -586,10 +576,6 @@ impl ZellijPlugin for State {
             .get("claude_dir")
             .cloned()
             .unwrap_or_else(|| "$HOME/.claude".to_string());
-        self.sessions_url = configuration
-            .get("sessions_url")
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_SESSIONS_URL.to_string());
         self.layouts = layout::Layouts::from_config(configuration.get("layouts").map(String::as_str));
         self.tick = configuration
             .get("tick")
@@ -643,6 +629,7 @@ impl ZellijPlugin for State {
             PermissionType::RunCommands,
             PermissionType::WriteToStdin, // `i`: a line typed here lands in the agent's pane
             PermissionType::ReadPaneContents, // the peek and `v`: an agent's screen, any session
+            PermissionType::MessageAndLaunchOtherPlugins, // `Ctrl o`: lvim-zsession's panel
         ]);
         subscribe(&[
             EventType::PermissionRequestResult,
@@ -1147,15 +1134,13 @@ impl State {
         self.arm_timer();
     }
 
-    /// The session panel instead of the board: the board hides, and the panel is launched (or
-    /// focused) exactly as `Ctrl s s` does it — same URL, same configuration — so it is one panel.
+    /// The session panel instead of the board: the board hides, and lvim-zsession's background
+    /// instance is asked for the panel — it launches it already at its size (a pane launched from
+    /// a plugin message can carry its coordinates; one launched by the CLI cannot, and jumps from
+    /// zellij's default size to its own), or brings the running one forward. One panel either way.
     fn open_sessions(&mut self) {
         self.hide();
-        let session = self.session_name.clone().unwrap_or_default();
-        run_command(
-            &["sh", "-c", OPEN_SESSIONS, "lvim-zclaude", &session, &self.sessions_url],
-            BTreeMap::from([("step".to_string(), "sessions".to_string())]),
-        );
+        pipe_message_to_plugin(MessageToPlugin::new("lvim-zsession-open"));
     }
 
     /// Take the board off the screen. The timer is left to run out; it does nothing while hidden.

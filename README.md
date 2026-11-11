@@ -206,8 +206,9 @@ to a pane), `ChangeApplicationState` (focusing that pane, closing it, naming and
 own pane), `RunCommands` (one `sh -c` per scan, the `kill` behind `S`, the pane `N` opens — a plugin
 is WASI in a sandbox and cannot read `~/.claude` itself), `WriteToStdin` (`i` — the line goes into
 the agent's pane, in this zellij session or another one), `ReadPaneContents` (the screen under
-the list, from `get_session_preview`, and `v`'s live view — which also needs `WriteToStdin`). Needs zellij built from `main` at or after
-`644d78c` (2026-11-10).
+the list, from `get_session_preview`, and `v`'s live view — which also needs `WriteToStdin`), `MessageAndLaunchOtherPlugins` (`Ctrl o`
+asks lvim-zsession's background instance for the session panel). Needs zellij built from `main` at
+or after `644d78c` (2026-11-10).
 
 **A pane that stays on zellij's "Loading" text, or shows a permission prompt after an upgrade,
 is this:** zellij's cache holds one list of permissions per plugin *path*, and every grant
