@@ -1228,6 +1228,7 @@ dependencies = [
 [[package]]
 name = "lvim-zlayout"
 version = "0.1.0"
+source = "git+https://github.com/lvim-tech/lvim-zlayout?rev=15eda3d9cf99c46c67f90e15ac087da70f4ab579#15eda3d9cf99c46c67f90e15ac087da70f4ab579"
 
 [[package]]
 name = "memchr"

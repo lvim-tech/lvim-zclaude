@@ -233,7 +233,7 @@ answered leaves that instance "loading" until it is closed
 | `summary_file` | — | a file the summary is written to, for a bar (see "For bars") |
 | `summary_pipe` | `off` | `on`: the summary is also broadcast as the `lvim-zclaude-summary` pipe |
 | `background_tick` | `30` | seconds between scans while hidden — only when a bar is fed |
-| `layouts` | `bg-bds` | keyboard layouts whose letters are read as the Latin keys — `Ctrl д` is `Ctrl o`, and on the list `э` is `v` (not while a filter is typed); tables from [lvim-zlayout](../lvim-zlayout), several separated by commas, `none` for off |
+| `layouts` | `bg-bds` | keyboard layouts whose letters are read as the Latin keys — `Ctrl д` is `Ctrl o`, and on the list `э` is `v` (not while a filter is typed); tables from [lvim-zlayout](https://github.com/lvim-tech/lvim-zlayout), several separated by commas, `none` for off |
 | `preview_tick` | `0.3` | seconds between screen reads while the board is open or a question is being answered (`a`) |
 
 The configuration goes where the plugin is loaded — in `load_plugins`, or in the braces of a
