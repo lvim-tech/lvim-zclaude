@@ -418,10 +418,11 @@ pub fn draw(view: &View, rows_available: usize, cols: usize) {
     header.push_str(&pad("N", w_n));
     println!("{}", fg(pal.map(|p| p.heading), &truncate(&header, cols)));
 
-    // The visible window follows the cursor. Title, column headings, the detail line and the
-    // footer are four; the block under the list takes what it takes.
+    // The visible window follows the cursor. Title, column headings and the detail line are
+    // three, the footer is as many lines as its help wraps to; the block under the list takes
+    // what it takes.
     let body = rows_available
-        .saturating_sub(4 + peek_height(view.peek.as_ref()))
+        .saturating_sub(3 + footer_height(view, cols) + peek_height(view.peek.as_ref()))
         .max(1);
     let first = view.cursor.saturating_sub(body.saturating_sub(1)).min(view.rows.len());
     // **Only the agents are numbered**, and the number stands in front of the name it belongs
@@ -663,12 +664,6 @@ fn keycap(pal: Option<Palette>, key: &str, what: &str) -> String {
     )
 }
 
-/// The help line itself: `Help: <a> - answer, <v> - terminal, …`.
-fn help_line(pal: Option<Palette>, keys: &[(&str, &str)]) -> String {
-    let caps: Vec<String> = keys.iter().map(|(key, what)| keycap(pal, key, what)).collect();
-    format!("{}{}", fg(pal.map(|p| p.heading), "Help: "), caps.join(&fg(pal.map(|p| p.muted), ", ")))
-}
-
 fn footer(view: &View, cols: usize) {
     let pal = view.palette;
     // A question outranks everything: it is the only line that is waiting for an answer.
@@ -712,7 +707,14 @@ fn footer(view: &View, cols: usize) {
         );
         return;
     }
-    let keys: &[(&str, &str)] = if view.peek.as_ref().is_some_and(|peek| peek.answering) {
+    for line in help_lines(pal, help_keys(view), cols) {
+        println!("{line}");
+    }
+}
+
+/// The keys the help line lists, for what the board is doing now.
+fn help_keys(view: &View) -> &'static [(&'static str, &'static str)] {
+    if view.peek.as_ref().is_some_and(|peek| peek.answering) {
         &[("1-9", " answer "), ("Enter", " confirm "), ("Esc", " stop answering")]
     } else {
         &[
@@ -729,32 +731,86 @@ fn footer(view: &View, cols: usize) {
             ("X", " close "),
             ("s", " order "),
             ("r", " refresh "),
+            ("Ctrl o", " sessions "),
             ("Esc", " hide"),
         ]
-    };
-    // **One line, whatever it costs.** A help line that wraps is two lines, and two lines push
-    // the whole board up by one — the column headings scroll off the top of the pane and the
-    // list looks headerless (2026-09-20). So: the words are dropped when they do not fit, and
-    // what is left is cut to the width by what is *seen*, escapes not counted.
-    let plain: usize = 6 + keys
-        .iter()
-        .map(|(key, what)| key.chars().count() + 5 + what.trim().chars().count())
-        .sum::<usize>();
-    let line = if plain + 2 <= cols {
-        help_line(pal, keys)
+    }
+}
+
+/// How many lines the footer takes: the help wraps, everything else is one line. `draw` asks
+/// this **before** it lays out the list, so a wrapped help line shortens the list instead of
+/// pushing the column headings off the top of the pane.
+fn footer_height(view: &View, cols: usize) -> usize {
+    if view.prompt.is_some() || view.input.is_some() || view.last_error.is_some() || view.preview.is_some() {
+        1
     } else {
-        let short: Vec<String> = keys
-            .iter()
-            .map(|(key, _)| fg(pal.map(|p| p.key), &format!("<{key}>")))
-            .collect();
-        short.join(" ")
-    };
-    println!("  {}", cut_ansi(&line, cols.saturating_sub(2)));
+        help_lines(view.palette, help_keys(view), cols).len()
+    }
+}
+
+/// `Help: <a> - answer, <v> - terminal, …`, **wrapped** to the width: a key and its word are
+/// never split, and the next line starts under the first key. Nothing is dropped and nothing
+/// ends in `…` — a key that is not on the screen is a key nobody learns.
+fn help_lines(pal: Option<Palette>, keys: &[(&str, &str)], cols: usize) -> Vec<String> {
+    const LEAD: &str = "  Help: ";
+    let lead = LEAD.chars().count();
+    let room = cols.saturating_sub(lead).max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut width = 0usize;
+    for (index, (key, what)) in keys.iter().enumerate() {
+        let comma = index + 1 < keys.len();
+        let seen = key.chars().count() + 5 + what.trim().chars().count() + usize::from(comma);
+        let gap = usize::from(width > 0);
+        if width > 0 && width + gap + seen > room {
+            lines.push(line);
+            line = String::new();
+            width = 0;
+        }
+        if width > 0 {
+            line.push(' ');
+            width += 1;
+        }
+        line.push_str(&keycap(pal, key, what));
+        if comma {
+            line.push_str(&fg(pal.map(|p| p.muted), ","));
+        }
+        width += seen;
+    }
+    lines.push(line);
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, keys)| {
+            // A single key wider than the pane is still cut, by what is seen, escapes not counted.
+            let keys = cut_ansi(&keys, room);
+            if index == 0 {
+                format!("  {}{keys}", fg(pal.map(|p| p.heading), "Help: "))
+            } else {
+                format!("{}{keys}", " ".repeat(lead))
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The help wraps instead of ending in `…`: every key is on the screen, no line is wider
+    /// than the pane, and a key never leaves its word on the line before.
+    #[test]
+    fn help_wraps_to_the_width() {
+        let keys = [("↑↓", " move "), ("Enter", " jump "), ("v", " terminal "), ("Esc", " hide")];
+        let lines = help_lines(None, &keys, 30);
+        assert!(lines.len() > 1, "{lines:?}");
+        assert!(lines.iter().all(|line| line.chars().count() <= 30), "{lines:?}");
+        let all = lines.join("\n");
+        for (key, what) in keys {
+            assert!(all.contains(&format!("<{key}> - {}", what.trim())), "{all}");
+        }
+        assert_eq!(help_lines(None, &keys, 200).len(), 1);
+    }
 
     /// Cutting on a byte inside a character panics, and a panic in a plugin is the board gone.
     #[test]

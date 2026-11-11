@@ -59,6 +59,14 @@ const PEEK_MAX_LINES: usize = 10;
 /// plus one `dump-screen` for the row under the cursor — tens of milliseconds, and only while
 /// the board is open. Hidden, it does not scan at all unless it feeds a bar (`background_tick`).
 const DEFAULT_TICK: f64 = 2.0;
+
+/// Where lvim-zpm keeps lvim-zsession — the URL `Ctrl s s` launches its panel from.
+const DEFAULT_SESSIONS_URL: &str = "file:$HOME/.config/zellij/zpm/plugins/lvim-zsession/lvim-zsession.wasm";
+
+/// `sh -c` with `$1` the zellij session and `$2` the panel's URL: launch lvim-zsession's panel
+/// floating in the focused tab, with the configuration the keybind gives it. `eval` expands the
+/// `$HOME` a configured URL carries.
+const OPEN_SESSIONS: &str = r#"eval "url=\"$2\"" && exec zellij --session "$1" action launch-or-focus-plugin --floating --move-to-focused-tab --configuration panel=on "$url""#;
 /// How often the agent's screen is re-read while the terminal view (`v`) is open or a question
 /// is being answered (`a`), in seconds — `preview_tick` in the configuration. One `dump-screen`
 /// per beat, ~10 ms; fast enough for a prompt to react as it would under the person's hands.
@@ -169,6 +177,9 @@ fn size_self(geometry: &Geometry) {
 struct State {
     // --- configuration ---
     claude_dir: String,
+    /// lvim-zsession's wasm (`sessions_url`): `Ctrl o` launches its panel. `$HOME` is expanded by
+    /// the shell, so the default is the same URL `config.kdl` binds to `Ctrl s s`.
+    sessions_url: String,
     tick: f64,
     geometry: Geometry,
     configuration: BTreeMap<String, String>,
@@ -294,6 +305,8 @@ struct State {
     peek: Option<Peek>,
     /// A `dump-screen` for the peek is on its way (the session id it is for).
     peek_inflight: Option<String>,
+    /// The session and pane the peek asked zellij about — how its `SessionPreview` is known.
+    peek_place: Option<(String, u32)>,
     /// `a`: the digits answer the question under the list instead of jumping.
     answering: bool,
     /// A digit was sent to a prompt and the screen has not been read since. If the question is
@@ -562,6 +575,10 @@ impl ZellijPlugin for State {
             .get("claude_dir")
             .cloned()
             .unwrap_or_else(|| "$HOME/.claude".to_string());
+        self.sessions_url = configuration
+            .get("sessions_url")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_SESSIONS_URL.to_string());
         self.tick = configuration
             .get("tick")
             .and_then(|tick| tick.parse::<f64>().ok())
@@ -613,6 +630,7 @@ impl ZellijPlugin for State {
             PermissionType::ChangeApplicationState,
             PermissionType::RunCommands,
             PermissionType::WriteToStdin, // `i`: a line typed here lands in the agent's pane
+            PermissionType::ReadPaneContents, // the peek and `v`: an agent's screen, any session
         ]);
         subscribe(&[
             EventType::PermissionRequestResult,
@@ -624,6 +642,7 @@ impl ZellijPlugin for State {
             EventType::Key,
             EventType::PastedText, // a paste while composing lands in the line, whole
             EventType::Visible,
+            EventType::SessionPreview, // an agent's screen, asked with `get_session_preview`
         ]);
     }
 
@@ -720,6 +739,7 @@ impl ZellijPlugin for State {
                 }
                 asked || titles || shown
             }
+            Event::SessionPreview(preview) => self.screen_arrived(preview),
             Event::RunCommandResult(code, out, err, context) => {
                 if context.get("step").map(String::as_str) == Some("panes") {
                     self.jump_there(&String::from_utf8_lossy(&out), &context);
@@ -732,14 +752,6 @@ impl ZellijPlugin for State {
                     } else {
                         self.last_error = Some("could not read the clipboard".into());
                     }
-                    return true;
-                }
-                if context.get("step").map(String::as_str) == Some("preview") {
-                    self.preview_arrived(code, &out, &err);
-                    return true;
-                }
-                if context.get("step").map(String::as_str) == Some("peek") {
-                    self.peek_arrived(code, &out, &context);
                     return true;
                 }
                 if context.get("step").map(String::as_str) == Some("keys") {
@@ -889,6 +901,23 @@ impl ZellijPlugin for State {
                 } else {
                     self.open();
                 }
+                true
+            }
+            // lvim-zsession's panel (`Ctrl o`): the agents of one zellij session. The filter is
+            // the session's own `NAME · ` from the TAB column, so Esc gives the whole board back.
+            "lvim-zclaude-open" => {
+                let session = message
+                    .payload
+                    .as_deref()
+                    .and_then(|p| p.strip_prefix("session="))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                self.filter = if session.is_empty() { String::new() } else { format!("{session} · ") };
+                self.cursor = 0;
+                self.rebuild();
+                self.showing = None;
+                self.open();
                 true
             }
             // From `hooks/lvim-zclaude-hook.sh`: a session is waiting, done, or working again.
@@ -1093,6 +1122,17 @@ impl State {
         self.unsized_yet = false;
         self.scan();
         self.arm_timer();
+    }
+
+    /// The session panel instead of the board: the board hides, and the panel is launched (or
+    /// focused) exactly as `Ctrl s s` does it — same URL, same configuration — so it is one panel.
+    fn open_sessions(&mut self) {
+        self.hide();
+        let session = self.session_name.clone().unwrap_or_default();
+        run_command(
+            &["sh", "-c", OPEN_SESSIONS, "lvim-zclaude", &session, &self.sessions_url],
+            BTreeMap::from([("step".to_string(), "sessions".to_string())]),
+        );
     }
 
     /// Take the board off the screen. The timer is left to run out; it does nothing while hidden.
@@ -1351,10 +1391,48 @@ impl State {
         }
         let Some((session, pane)) = self.place_of(&target) else { return };
         self.peek_inflight = Some(row.id.clone());
-        run_command(
-            &["zellij", "--session", &session, "action", "dump-screen", "--pane-id", &format!("terminal_{pane}")],
-            BTreeMap::from([("step".to_string(), "peek".to_string()), ("id".to_string(), row.id.clone())]),
-        );
+        self.peek_place = Some((session.clone(), pane));
+        get_session_preview(&session, None, Some((pane, false)));
+    }
+
+    /// An agent's screen, from zellij (`get_session_preview`, the pane's viewport with its
+    /// colours): for the terminal view, for the peek, or both when they look at the same pane.
+    fn screen_arrived(&mut self, preview: SessionPreview) -> bool {
+        let Some((pane, false)) = preview.pane_id else {
+            // An error names no pane (a session that is gone, a timeout): whatever waited on
+            // that session stops waiting, so the next beat can ask again.
+            if self.peek_place.as_ref().is_some_and(|(session, _)| *session == preview.session_name) {
+                self.peek_place = None;
+                self.peek_inflight = None;
+            }
+            let shown = self.showing.as_ref().and_then(|p| self.place_of(&p.target));
+            if let (Some((session, _)), Some(error)) = (shown, preview.error.as_ref()) {
+                if session == preview.session_name {
+                    self.preview_arrived(Err(error));
+                    return true;
+                }
+            }
+            return false;
+        };
+        let place = (preview.session_name.clone(), pane);
+        let mut changed = false;
+        let shown = self.showing.as_ref().and_then(|p| self.place_of(&p.target));
+        if shown.as_ref() == Some(&place) {
+            match &preview.error {
+                Some(error) => self.preview_arrived(Err(error)),
+                None => self.preview_arrived(Ok(&preview.contents)),
+            }
+            changed = true;
+        }
+        if self.peek_place.as_ref() == Some(&place) {
+            self.peek_place = None;
+            let id = self.peek_inflight.clone().unwrap_or_default();
+            let plain: String = preview.contents.lines().map(|l| ui::strip_ansi(l) + "\n").collect();
+            let code = if preview.error.is_none() { Some(0) } else { None };
+            self.peek_arrived(code, plain.as_bytes(), &BTreeMap::from([("id".to_string(), id)]));
+            changed = true;
+        }
+        changed
     }
 
     /// The screen for the peek came back: the tail and the question out of it. An answered
@@ -1757,6 +1835,11 @@ impl State {
                 self.hide();
                 true
             }
+            // lvim-zsession's panel, in this board's place.
+            BareKey::Char('o') if ctrl => {
+                self.open_sessions();
+                true
+            }
             BareKey::Down => self.move_cursor(1),
             BareKey::Up => self.move_cursor(-1),
             BareKey::PageDown => self.move_cursor(10),
@@ -1944,27 +2027,12 @@ impl State {
                 self.last_error = Some(what);
             }
             Target::Remote { session, pane } => {
-                self.last_error = Some(format!("{what}…"));
-                let pane = format!("terminal_{pane}");
+                let pane = PaneId::Terminal(*pane);
+                write_to_session_pane(session, pane, text.as_bytes().to_vec());
                 if submit {
-                    let script = "zellij --session \"$1\" action write-chars --pane-id \"$2\" -- \"$3\"; \
-                                  zellij --session \"$1\" action write --pane-id \"$2\" 13";
-                    run_command(
-                        &["sh", "-c", script, "lvim-zclaude", session, &pane, text],
-                        BTreeMap::from([
-                            ("step".to_string(), "remote-send".to_string()),
-                            ("what".to_string(), what),
-                        ]),
-                    );
-                } else {
-                    run_command(
-                        &["zellij", "--session", session, "action", "write-chars", "--pane-id", &pane, "--", text],
-                        BTreeMap::from([
-                            ("step".to_string(), "remote-send".to_string()),
-                            ("what".to_string(), what),
-                        ]),
-                    );
+                    write_to_session_pane(session, pane, vec![b'\r']);
                 }
+                self.last_error = Some(what);
             }
         }
     }
@@ -2286,32 +2354,21 @@ impl State {
             Target::Remote { session, pane } => (session.clone(), *pane),
             Target::Local(pane) => (self.session_name.clone().unwrap_or_default(), *pane),
         };
-        run_command(
-            &[
-                "zellij",
-                "--session",
-                &session,
-                "action",
-                "dump-screen",
-                "--pane-id",
-                &format!("terminal_{pane}"),
-                "--ansi",
-            ],
-            BTreeMap::from([("step".to_string(), "preview".to_string())]),
-        );
+        get_session_preview(&session, None, Some((pane, false)));
     }
 
     /// The agent's screen came back, styled. The pane's viewport is what `dump-screen` gives
     /// without `--full`; trailing blank lines (blank once the escapes are taken out) are dropped
     /// so the last thing said sits at the bottom.
-    fn preview_arrived(&mut self, code: Option<i32>, out: &[u8], err: &[u8]) {
+    fn preview_arrived(&mut self, screen: Result<&str, &String>) {
         let Some(preview) = self.showing.as_mut() else { return };
-        if code != Some(0) {
-            let reason = String::from_utf8_lossy(err);
-            preview.lines = vec![format!("could not read the pane: {}", reason.trim())];
-            return;
-        }
-        let text = String::from_utf8_lossy(out);
+        let text = match screen {
+            Ok(text) => text,
+            Err(reason) => {
+                preview.lines = vec![format!("could not read the pane: {}", reason.trim())];
+                return;
+            }
+        };
         let mut lines: Vec<String> = text.lines().map(|line| line.trim_end().to_string()).collect();
         while lines.last().is_some_and(|line| ui::strip_ansi(line).trim().is_empty()) {
             lines.pop();
@@ -2355,14 +2412,7 @@ impl State {
         match target {
             Target::Local(pane) => write_to_pane_id(bytes, PaneId::Terminal(*pane)),
             Target::Remote { session, pane } => {
-                let mut argv: Vec<String> = ["zellij", "--session", session, "action", "write", "--pane-id"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
-                argv.push(format!("terminal_{pane}"));
-                argv.extend(bytes.iter().map(|b| b.to_string()));
-                let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-                run_command(&argv, BTreeMap::from([("step".to_string(), "keys".to_string())]));
+                write_to_session_pane(session, PaneId::Terminal(*pane), bytes);
             }
         }
     }

@@ -21,7 +21,7 @@ without leaving the board.
    ▏ ● Building now.
    ▏ Running 1 shell command…
    ▏ ⎿  $ cargo build --release
- [↑↓] move [Enter] jump [v] terminal [a] answer [Tab] expand [i] send [f] later [p] paste [S] stop [N] new [X] close [s] order [r] refresh [Esc] hide
+ [↑↓] move [Enter] jump [v] terminal [a] answer [Tab] expand [i] send [f] later [p] paste [S] stop [N] new [X] close [s] order [r] refresh [Ctrl o] sessions [Esc] hide
 ```
 
 `●` busy, `◐` running and idle, `○` not running. A heading is a zellij session (`outside zellij`
@@ -98,10 +98,11 @@ in `~/.cache/zellij/permissions.kdl` (lvim-zpm writes them there at session star
 | `g` `G`, `PageUp` `PageDown` | first, last, page |
 | `Esc` | clear the filter, or hide the board |
 | `Ctrl c` | hide the board |
+| `Ctrl o` | lvim-zsession's session panel in the board's place (its `Ctrl o` comes back, filtered to that session's agents) |
 
 ## Under the list: the last thing the agent said, and the buttons
 
-With the cursor on an agent, the board reads its screen (`dump-screen` of its pane, on every
+With the cursor on an agent, the board reads its screen (zellij's `get_session_preview` of its pane, on every
 scan, on every hook event, and whenever the cursor lands on it) and shows the last three
 non-blank lines under the list. When the screen **ends with numbered options** — Claude Code's
 permission prompt, its plan approval, an `AskUserQuestion` —
@@ -134,10 +135,28 @@ queued follow-up (`f`) when the turn is over. Register the script in `~/.claude/
                            "hooks": [{ "type": "command", "command": "/path/to/lvim-zclaude/hooks/lvim-zclaude-hook.sh", "timeout": 5 }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "/path/to/lvim-zclaude/hooks/lvim-zclaude-hook.sh", "timeout": 5 }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/path/to/lvim-zclaude/hooks/lvim-zclaude-hook.sh", "timeout": 5 }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "/path/to/lvim-zclaude/hooks/lvim-zclaude-hook.sh", "timeout": 5 }] }]
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "/path/to/lvim-zclaude/hooks/lvim-zclaude-hook.sh", "timeout": 5 }] }],
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "/path/to/lvim-zclaude/hooks/lvim-zclaude-hook.sh", "timeout": 5 }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "/path/to/lvim-zclaude/hooks/lvim-zclaude-hook.sh", "timeout": 5 }] }]
   }
 }
 ```
+
+**Inside zellij the hook also tells zellij itself** (zellij `644d78c` and later):
+
+- **program status, OSC 7501** — written to the agent's own terminal (the first ancestor of the
+  hook with a tty, which is `claude`), as if `claude` had said it: `state=working`,
+  `state=blocked:kind=permission` / `kind=question` (with the notification text as `msg`),
+  `state=done`, `state=idle` at `SessionStart`, `state=clear` at `SessionEnd`; always
+  `app=claude`. zellij then marks the tab, lists it in its inbox, and lvim-zsession's ATTENTION
+  column shows it — in every session. lvim-zbar leaves `app=claude` out of its own field, since
+  the agents are already counted next to it.
+- **the pane's resurrect command** — `zellij action set-resurrect-command -- claude <its own
+  arguments> --resume <session_id>`, on `SessionStart` and every `UserPromptSubmit`, cleared at
+  `SessionEnd`. A restarted (`Ctrl s Ctrl r`) or resurrected session brings the conversation back,
+  not a fresh `claude --continue`. `--resume`, `--continue` and `--session-id` are taken out of
+  claude's own arguments first. Without `SessionEnd` registered, a pane whose claude has exited
+  keeps the command until the pane closes.
 
 The pipe's payload is `session_id\tstate\tkind\tcwd\tepoch\tnotify\tmessage`; the last field is
 the notification's own text ("Claude needs your permission to use Bash"), which the board shows
@@ -186,7 +205,9 @@ last writer wins and they agree.
 to a pane), `ChangeApplicationState` (focusing that pane, closing it, naming and sizing the board's
 own pane), `RunCommands` (one `sh -c` per scan, the `kill` behind `S`, the pane `N` opens — a plugin
 is WASI in a sandbox and cannot read `~/.claude` itself), `WriteToStdin` (`i` — the line goes into
-the agent's pane).
+the agent's pane, in this zellij session or another one), `ReadPaneContents` (the screen under
+the list and `v`, from `get_session_preview`). Needs zellij built from `main` at or after
+`644d78c` (2026-11-10).
 
 **A pane that stays on zellij's "Loading" text, or shows a permission prompt after an upgrade,
 is this:** zellij's cache holds one list of permissions per plugin *path*, and every grant
@@ -271,8 +292,9 @@ is a canary: when it fails, `zellij-tile` has been fixed and `host.rs`/`keys.rs`
   what the plugin prints; a terminal pane's grid lives in the server that owns it, and no plugin
   call hands a plugin another pane's output or draws one pane inside another
   (`replace_pane_with_existing_pane` swaps places, `break_panes_to_tab_with_index` moves within
-  one session). Another zellij session is another server process: its pane can only be read
-  with `dump-screen` and typed into with `write`, both through the CLI. So `v` reads the pane
+  one session). Another zellij session is another server process: since zellij `644d78c` a
+  plugin reads its pane with `get_session_preview` and types into it with
+  `write_to_session_pane` (before, only the CLI's `dump-screen` and `write` could). So `v` reads the pane
   every `preview_tick` with its colours and writes every key into it as the bytes a terminal
   sends; the cursor and mouse are not carried, and a key zellij binds for itself never reaches
   the board. For the real pane under your hands there is `Enter`.

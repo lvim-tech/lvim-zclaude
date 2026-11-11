@@ -11,7 +11,9 @@
 //   RunCommands            — the one `sh -c` scan, the `kill` behind `S`, and the pane `N` opens.
 //                            A plugin is WASI in a sandbox and cannot read `~/.claude` itself.
 //   WriteToStdin           — `i`: the line typed on the board is written into the agent's pane,
-//                            exactly as if it had been typed there.
+//                            exactly as if it had been typed there (in any zellij session).
+//   ReadPaneContents       — the peek under the list and `v`: an agent's screen, from zellij's
+//                            `get_session_preview`, in this session or another one.
 //
 // The key sends the board a MESSAGE (`MessagePlugin … name "open"`) rather than launching it
 // (`LaunchOrFocusPlugin`), and `Esc` hides the board rather than closing it. A launched or
@@ -37,7 +39,7 @@
 // launched that way, which is the way that flashes.
 plugin {
     wasm "lvim-zclaude.wasm"
-    permissions "ReadApplicationState" "ChangeApplicationState" "RunCommands" "WriteToStdin"
+    permissions "ReadApplicationState" "ChangeApplicationState" "RunCommands" "WriteToStdin" "ReadPaneContents"
     keybinds {
         tmux {
             // `summary_pipe "on"`: the fleet line is broadcast to the session's other plugins as
