@@ -7,6 +7,8 @@ description = "Claude Code sessions board for zellij: which sessions exist, whic
 license = "BSD-3-Clause"
 
 [dependencies]
+# The keyboard layouts (`layout.rs`); a sibling repo until it is published.
+lvim-zlayout = { path = "../lvim-zlayout" }
 zellij-tile = { git = "https://github.com/zellij-org/zellij", rev = "644d78cecac14ac77d37fe7b9b1eacbedeec1691" }
 
 [profile.release]

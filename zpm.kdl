@@ -46,7 +46,7 @@ plugin {
             // `lvim-zclaude-summary`, which is what lvim-zbar's `✳ 3 agents · 1 waiting` reads.
             // A configuration given here reaches the board only when it is launched from this
             // key; the durable place for it is the `load_plugins` entry in `config.kdl`.
-            bind "a" { MessagePlugin "{{wasm}}" { name "open"; floating true; summary_pipe "on"; }; SwitchToMode "normal"; }
+            bind "a" "ь" { MessagePlugin "{{wasm}}" { name "open"; floating true; summary_pipe "on"; }; SwitchToMode "normal"; }
         }
     }
 }

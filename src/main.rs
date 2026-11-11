@@ -37,6 +37,7 @@
 #[cfg(not(test))]
 mod host;
 mod keys;
+mod layout;
 mod model;
 mod scan;
 mod ui;
@@ -180,6 +181,8 @@ struct State {
     /// lvim-zsession's wasm (`sessions_url`): `Ctrl o` launches its panel. `$HOME` is expanded by
     /// the shell, so the default is the same URL `config.kdl` binds to `Ctrl s s`.
     sessions_url: String,
+    /// The keyboard layouts whose letters are read as the Latin keys (`layouts`, `layout.rs`).
+    layouts: layout::Layouts,
     tick: f64,
     geometry: Geometry,
     configuration: BTreeMap<String, String>,
@@ -587,6 +590,7 @@ impl ZellijPlugin for State {
             .get("sessions_url")
             .cloned()
             .unwrap_or_else(|| DEFAULT_SESSIONS_URL.to_string());
+        self.layouts = layout::Layouts::from_config(configuration.get("layouts").map(String::as_str));
         self.tick = configuration
             .get("tick")
             .and_then(|tick| tick.parse::<f64>().ok())
@@ -1776,6 +1780,9 @@ impl State {
     }
 
     fn key(&mut self, key: KeyWithModifier) -> bool {
+        // `Ctrl д` is `Ctrl o` with the Bulgarian layout on (`layout.rs`). Bare letters are
+        // turned into commands below, only where they are commands.
+        let key = layout::modified_to_latin(&self.layouts, key);
         let typing = !self.filter.is_empty();
         let ctrl = key.key_modifiers.contains(&KeyModifier::Ctrl);
 
@@ -1805,7 +1812,7 @@ impl State {
         // A question is on the footer: `y` does it, anything else does not. No second meaning for
         // any other key while something is waiting to be confirmed.
         if let Some((act, _)) = self.pending.take() {
-            if key.bare_key == BareKey::Char('y') && !ctrl {
+            if layout::plain_to_latin(&self.layouts, &key).bare_key == BareKey::Char('y') && !ctrl {
                 self.perform(act);
             } else {
                 self.last_error = Some("cancelled".into());
@@ -1821,6 +1828,11 @@ impl State {
             return self.answer_key(&key, ctrl);
         }
 
+        // On the list a bare letter is a command (`v`, `a`, `N`) until a filter is being typed: a
+        // BDS letter means the Latin key in its place. What starts a filter is still the letter
+        // as typed (`typed`).
+        let typed = key.bare_key;
+        let key = if typing { key } else { layout::plain_to_latin(&self.layouts, &key) };
         match key.bare_key {
             BareKey::Esc => {
                 if typing {
@@ -1955,8 +1967,10 @@ impl State {
                 self.rebuild();
                 true
             }
-            BareKey::Char(c) if !ctrl => {
-                self.filter.push(c);
+            BareKey::Char(_) if !ctrl => {
+                if let BareKey::Char(c) = typed {
+                    self.filter.push(c);
+                }
                 self.rebuild();
                 true
             }

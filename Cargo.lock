@@ -1221,8 +1221,13 @@ dependencies = [
 name = "lvim-zclaude"
 version = "0.1.0"
 dependencies = [
+ "lvim-zlayout",
  "zellij-tile",
 ]
+
+[[package]]
+name = "lvim-zlayout"
+version = "0.1.0"
 
 [[package]]
 name = "memchr"
