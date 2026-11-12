@@ -211,10 +211,9 @@ pub struct PreviewView<'a> {
 }
 
 /// The rows zellij draws the agent's pane into: everything between the heading (row 0) and the
-/// footer. Every line printed ends with a newline, so the plugin prints one line fewer than it has
-/// rows — printing all of them would scroll the heading off the top.
+/// footer (the last row, printed without a newline — one more would scroll the heading off the top).
 pub fn preview_body_rows(rows: usize) -> usize {
-    rows.saturating_sub(3).max(1)
+    rows.saturating_sub(2).max(1)
 }
 
 /// What sits under the list for the agent under the cursor.
@@ -682,7 +681,7 @@ fn footer(view: &View, cols: usize) {
         // Cut the question, not the line: the colours are escapes, and cutting a coloured line by
         // characters would cut them in half.
         let room = cols.saturating_sub(32);
-        println!(
+        print!(
             "  {} {}",
             fg(pal.map(|p| p.error), &truncate(prompt, room)),
             keycap(pal, "y", " yes · anything else cancels")
@@ -694,7 +693,7 @@ fn footer(view: &View, cols: usize) {
         // label with no room for what is being typed would be a question with no answer.
         let label = truncate(label, (cols * 2 / 3).saturating_sub(3));
         let room = cols.saturating_sub(label.chars().count() + 4);
-        println!(
+        print!(
             "  {}{}{}",
             fg(pal.map(|p| p.key), &label),
             fg(pal.map(|p| p.name), &truncate(input, room)),
@@ -703,7 +702,7 @@ fn footer(view: &View, cols: usize) {
         return;
     }
     if let Some(error) = view.last_error {
-        println!("{}", fg(pal.map(|p| p.error), &truncate(&format!("  {error}"), cols)));
+        print!("{}", fg(pal.map(|p| p.error), &truncate(&format!("  {error}"), cols)));
         return;
     }
     if let Some(preview) = view.preview.as_ref() {
@@ -719,13 +718,13 @@ fn footer(view: &View, cols: usize) {
                     keycap(pal, "Alt Enter", " back to the list")
                 ),
             };
-            println!(
+            print!(
                 "  {}{}",
                 fg(pal.map(|p| p.muted), "every key goes to the agent, Esc too · "),
                 release
             );
         } else {
-            println!(
+            print!(
                 "  {}  {}",
                 keycap(pal, "Enter", " type into the agent"),
                 keycap(pal, "Esc", " back to the list")
@@ -733,8 +732,16 @@ fn footer(view: &View, cols: usize) {
         }
         return;
     }
-    for line in help_lines(pal, help_keys(view), cols) {
-        println!("{line}");
+    // The last line is printed without a newline: one more would scroll the pane by a line and
+    // push the title off the top (zellij's `SCROLL: 0/1`).
+    let lines = help_lines(pal, help_keys(view), cols);
+    let last = lines.len().saturating_sub(1);
+    for (index, line) in lines.iter().enumerate() {
+        if index == last {
+            print!("{line}");
+        } else {
+            println!("{line}");
+        }
     }
 }
 
